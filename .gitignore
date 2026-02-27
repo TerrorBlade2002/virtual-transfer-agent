@@ -33,5 +33,3 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Local data files
-contacts.csv
