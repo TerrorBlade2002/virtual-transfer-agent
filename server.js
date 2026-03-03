@@ -765,11 +765,24 @@ function sm(el,t,c){el.className='msg '+c;el.textContent=t}
 app.get("/", (req, res) => res.send(UPLOAD_PAGE_HTML));
 
 // ============================================================
-// STARTUP — restore last uploaded file on container restart
+// STARTUP — load contacts from root ./contacts.csv OR ./data/ directory
 // ============================================================
 async function startup() {
-  for (const ext of [".csv", ".xlsx", ".xls"]) {
-    const filePath = path.join(DATA_DIR, `contacts${ext}`);
+  // Check locations in priority order:
+  // 1. Root directory (original deployment: ./contacts.csv)
+  // 2. Data directory (uploaded via portal: ./data/contacts.csv)
+  const searchPaths = [
+    // Root directory files (your original contacts.csv lives here)
+    "./contacts.csv",
+    "./contacts.xlsx",
+    "./contacts.xls",
+    // Data directory files (created by upload portal)
+    path.join(DATA_DIR, "contacts.csv"),
+    path.join(DATA_DIR, "contacts.xlsx"),
+    path.join(DATA_DIR, "contacts.xls"),
+  ];
+
+  for (const filePath of searchPaths) {
     if (fs.existsSync(filePath)) {
       try {
         const rows = await loadFromFile(filePath);
@@ -777,17 +790,17 @@ async function startup() {
         dataStatus.loaded = true;
         dataStatus.records = records;
         dataStatus.phoneEntries = phoneEntries;
-        dataStatus.filename = `contacts${ext} (restored on restart)`;
+        dataStatus.filename = path.basename(filePath);
         dataStatus.uploadedAt = new Date(
           fs.statSync(filePath).mtime
         ).toISOString();
         console.log(
-          `[STARTUP] Restored ${records} records (${phoneEntries} phones) from ${filePath}`
+          `[STARTUP] Loaded ${records} records (${phoneEntries} phones) from ${filePath}`
         );
         break;
       } catch (err) {
         console.error(
-          `[STARTUP] Failed to restore ${filePath}:`,
+          `[STARTUP] Failed to load ${filePath}:`,
           err.message
         );
       }
