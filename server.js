@@ -136,6 +136,7 @@ app.post("/retell-webhook", (req, res) => {
         dynamic_variables: {
           full_name: contact.full_name,
           ssn_last_two_digit: contact.ssn_last_two_digit,
+          caller_phone: normalizedFrom,
         },
         metadata: {
           source: "tcn_linkback",
@@ -155,6 +156,7 @@ app.post("/retell-webhook", (req, res) => {
       dynamic_variables: {
         full_name: "",
         ssn_last_two_digit: "",
+        caller_phone: normalizedFrom,
       },
       metadata: {
         source: "tcn_linkback",
@@ -172,11 +174,18 @@ app.post("/retell-webhook", (req, res) => {
 // ============================================================
 app.post("/log-verification", (req, res) => {
   const args = req.body?.args || req.body || {};
-  const { phone, status, summary, full_name } = args;
-  const normalized = normalizePhone(phone || "");
+  const { status, summary, full_name } = args;
+
+  // Get phone from Retell's call metadata (more reliable than LLM args)
+  const phone = args.phone
+    || req.body?.call?.from_number
+    || req.body?.call?.to_number
+    || "";
+  const normalized = normalizePhone(phone);
 
   if (!normalized || normalized.length !== 10 || !status) {
-    console.log(`[VERIFICATION] ERROR — phone=${phone}, status=${status}`);
+    console.log(`[VERIFICATION] ERROR — phone=${phone}, normalized=${normalized}, status=${status}`);
+    console.log(`[VERIFICATION] Full body keys:`, Object.keys(req.body));
     return res.json({ result: "error: missing phone or status" });
   }
 
