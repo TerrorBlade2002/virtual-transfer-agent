@@ -136,7 +136,6 @@ app.post("/retell-webhook", (req, res) => {
         dynamic_variables: {
           full_name: contact.full_name,
           ssn_last_two_digit: contact.ssn_last_two_digit,
-          caller_phone: normalizedFrom,
         },
         metadata: {
           source: "tcn_linkback",
@@ -156,7 +155,6 @@ app.post("/retell-webhook", (req, res) => {
       dynamic_variables: {
         full_name: "",
         ssn_last_two_digit: "",
-        caller_phone: normalizedFrom,
       },
       metadata: {
         source: "tcn_linkback",
@@ -173,27 +171,34 @@ app.post("/retell-webhook", (req, res) => {
 // Stores the result so TCN can read it after Linkback completes.
 // ============================================================
 app.post("/log-verification", (req, res) => {
+  console.log(`[VERIFICATION] Full payload:`, JSON.stringify(req.body, null, 2));
+
   const args = req.body?.args || req.body || {};
   const { status, summary, full_name } = args;
 
-  // Get phone from Retell's call metadata (more reliable than LLM args)
+  // Try to get phone from multiple sources — don't fail if missing
   const phone = args.phone
     || req.body?.call?.from_number
     || req.body?.call?.to_number
+    || req.body?.from_number
     || "";
   const normalized = normalizePhone(phone);
 
-  if (!normalized || normalized.length !== 10 || !status) {
-    console.log(`[VERIFICATION] ERROR — phone=${phone}, normalized=${normalized}, status=${status}`);
-    console.log(`[VERIFICATION] Full body keys:`, Object.keys(req.body));
-    return res.json({ result: "error: missing phone or status" });
+  if (!status) {
+    console.log(`[VERIFICATION] ERROR — no status provided`);
+    return res.json({ result: "error: missing status" });
   }
 
-  storeVerification(normalized, {
-    status,
-    summary: summary || "",
-    full_name: full_name || "",
-  });
+  // Store verification — use phone if available, "unknown" if not
+  const phoneKey = (normalized && normalized.length === 10) ? normalized : "unknown";
+
+  if (phoneKey !== "unknown") {
+    storeVerification(phoneKey, {
+      status,
+      summary: summary || "",
+      full_name: full_name || "",
+    });
+  }
 
   stats.verificationsLogged++;
   if (status === "verified") stats.verifiedCount++;
@@ -202,14 +207,14 @@ app.post("/log-verification", (req, res) => {
   else if (status === "third_party") stats.thirdPartyCount++;
 
   dispositionLog.push({
-    phone: normalized,
+    phone: phoneKey,
     status,
     summary: summary || "",
     full_name: full_name || "",
     timestamp: new Date().toISOString(),
   });
 
-  console.log(`[VERIFICATION] ${normalized}: ${status} — ${summary || ""}`);
+  console.log(`[VERIFICATION] ${phoneKey}: ${status} — ${summary || ""}`);
 
   return res.json({ result: `Logged: ${status}` });
 });
