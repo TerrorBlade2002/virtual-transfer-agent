@@ -222,46 +222,69 @@ app.post("/log-verification", (req, res) => {
 // ============================================================
 // ROUTE 3: TCN — GET VERIFICATION STATUS
 //
-// TCN Custom Integration JS calls this after Linkback Action OK.
+// TCN Data Dip calls this after Linkback Action OK.
 // Returns status + whisper text + disposition code.
+//
+// HTTP STATUS CODE STRATEGY (drives TCN branching):
+//   200 → verified / customer_wants_human → Data Dip Action OK → Hunt Group
+//   409 → failed / third_party            → Data Dip Action Error → Hangup (no agent)
+//   404 → no result found                 → Data Dip Action Error → Hangup (no agent)
 // ============================================================
 app.get("/verification-status", (req, res) => {
   const phone = req.query.phone || "";
   const normalized = normalizePhone(phone);
   const result = getVerification(normalized);
 
-  if (result) {
-    let whisper = "";
-    let disposition = "";
-
-    switch (result.status) {
-      case "verified":
-        whisper = `Verified call. Customer ${result.full_name || "unknown"} confirmed identity.`;
-        disposition = "VTA_VERIFIED";
-        break;
-      case "customer_wants_human":
-        whisper = `Customer requested live agent. Verify manually.`;
-        disposition = "VTA_HUMAN_REQUESTED";
-        break;
-      case "failed":
-        whisper = `Verification failed. Could not confirm identity.`;
-        disposition = "VTA_FAILED";
-        break;
-      case "third_party":
-        whisper = `Third party answered. Not the account holder.`;
-        disposition = "VTA_THIRD_PARTY";
-        break;
-      default:
-        whisper = `VTA processed. Status: ${result.status}`;
-        disposition = "VTA_UNKNOWN";
-    }
-
-    console.log(`[TCN LOOKUP] ${normalized}: ${result.status}`);
-    return res.json({ found: true, status: result.status, disposition, whisper, summary: result.summary, full_name: result.full_name });
+  if (!result) {
+    console.log(`[TCN LOOKUP] ${normalized}: NOT FOUND → HTTP 404`);
+    return res.status(404).json({
+      found: false,
+      status: "no_result",
+      disposition: "VTA_NO_RESULT",
+      whisper: "VTA: No verification data. Verify manually.",
+    });
   }
 
-  console.log(`[TCN LOOKUP] ${normalized}: NOT FOUND`);
-  return res.json({ found: false, status: "unknown", disposition: "VTA_NO_RESULT", whisper: "VTA call. Verification unknown. Verify manually." });
+  let whisper = "";
+  let disposition = "";
+  let httpCode = 200;
+
+  switch (result.status) {
+    case "verified":
+      whisper = `VTA VERIFIED — ${result.full_name || "Customer"} confirmed identity.`;
+      disposition = "VTA_VERIFIED";
+      httpCode = 200;
+      break;
+    case "customer_wants_human":
+      whisper = `VTA HUMAN REQUESTED — ${result.full_name || "Customer"} wants live agent. Verify manually.`;
+      disposition = "VTA_HUMAN_REQUESTED";
+      httpCode = 200;
+      break;
+    case "failed":
+      whisper = `VTA FAILED — Could not confirm identity.`;
+      disposition = "VTA_FAILED";
+      httpCode = 409;
+      break;
+    case "third_party":
+      whisper = `VTA THIRD PARTY — Not the account holder.`;
+      disposition = "VTA_THIRD_PARTY";
+      httpCode = 409;
+      break;
+    default:
+      whisper = `VTA UNKNOWN — Status: ${result.status}`;
+      disposition = "VTA_UNKNOWN";
+      httpCode = 409;
+  }
+
+  console.log(`[TCN LOOKUP] ${normalized}: ${result.status} → HTTP ${httpCode}`);
+  return res.status(httpCode).json({
+    found: true,
+    status: result.status,
+    disposition,
+    whisper,
+    summary: result.summary,
+    full_name: result.full_name,
+  });
 });
 
 // ============================================================
@@ -300,7 +323,55 @@ app.post("/retell-call-ended", (req, res) => {
 });
 
 // ============================================================
-// ROUTE 5: DISPOSITIONS
+// ROUTE 5: TEST — INJECT VERIFICATION STATUS (for TCN testing)
+//
+// Manually store a verification result so you can test TCN's
+// Data Dip branching without running a real Retell call.
+//
+// Usage:
+//   GET /test-inject?phone=9043230987&status=verified&name=John+Smith
+//   GET /test-inject?phone=9043230987&status=failed
+//   GET /test-inject?phone=9043230987&status=third_party
+//   GET /test-inject?phone=9043230987&status=customer_wants_human
+//
+// Then trigger TCN broadcast — Data Dip will hit /verification-status
+// and get the injected result with the correct HTTP code.
+// ============================================================
+app.get("/test-inject", (req, res) => {
+  const phone = req.query.phone || "";
+  const status = req.query.status || "verified";
+  const name = req.query.name || "Test Customer";
+  const normalized = normalizePhone(phone);
+
+  if (!normalized || normalized.length !== 10) {
+    return res.status(400).json({ error: "Invalid phone — need 10 digits" });
+  }
+
+  const validStatuses = ["verified", "customer_wants_human", "failed", "third_party"];
+  if (!validStatuses.includes(status)) {
+    return res.status(400).json({ error: `Invalid status. Use: ${validStatuses.join(", ")}` });
+  }
+
+  storeVerification(normalized, {
+    status,
+    summary: `TEST INJECT: ${status}`,
+    full_name: name,
+  });
+
+  console.log(`[TEST INJECT] ${normalized}: ${status} (${name}) — expires in 5 min`);
+
+  return res.json({
+    success: true,
+    phone: normalized,
+    status,
+    full_name: name,
+    message: `Injected. Now dial ${normalized} from TCN within 5 min.`,
+    verify_url: `https://virtual-transfer-agent-production.up.railway.app/verification-status?phone=${normalized}`,
+  });
+});
+
+// ============================================================
+// ROUTE 6: DISPOSITIONS
 // ============================================================
 app.get("/dispositions", (req, res) => {
   const limit = parseInt(req.query.limit) || 100;
