@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3000;
 
 // Your CSV column mappings
 const PHONE_COLUMNS = ["PHONE1", "PHONE2", "PHONE3", "PHONE4", "PHONE5", "PHONE6"];
-const NAME_COLUMN = "FIRSTNAME";         // → Retell {{full_name}}
+const NAME_COLUMN = "FULL_NAME";         // → Retell {{full_name}}
 
 // ============================================================
 // DISPOSITION LABELS
