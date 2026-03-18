@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3000;
 
 // Your CSV column mappings
 const PHONE_COLUMNS = ["PHONE1", "PHONE2", "PHONE3", "PHONE4", "PHONE5", "PHONE6"];
-const NAME_COLUMN = "FULL_NAME";         // → Retell {{full_name}}
+const NAME_COLUMN = "FIRSTNAME";         // → Retell {{full_name}}
 
 // ============================================================
 // DISPOSITION LABELS
@@ -403,8 +403,34 @@ app.post("/retell-call-ended", (req, res) => {
       // Try to upgrade customer_disconnected with call analysis
       if (existing.status === "customer_disconnected" && call.call_analysis) {
         const cs = (call.call_analysis.call_summary || "").toLowerCase();
+        const callSuccessful = call.call_analysis.call_successful;
 
-        if (cs.includes("wrong number") || cs.includes("wrong person")) {
+        // Check verified FIRST — if Retell says call was successful and
+        // agent disconnected (not customer), this was a completed verification
+        if (
+          callSuccessful === true
+          || cs.includes("confirmed identity")
+          || cs.includes("confirmed name")
+          || cs.includes("verified")
+          || cs.includes("transfer to a representative")
+          || cs.includes("transfer to our representative")
+          || (cs.includes("confirmed") && cs.includes("transfer"))
+        ) {
+          existing.status = "verified";
+          existing.disposition = getDispositionLabel("verified");
+          existing.summary = `Inferred: ${call.call_analysis.call_summary || ""}`;
+          stats.customerDisconnectedCount--;
+          stats.verifiedCount++;
+          // Also update verificationResults so TCN Data Dip reads correct status
+          if (existing.phone && existing.phone.length === 10) {
+            storeVerification(existing.phone, {
+              status: "verified",
+              summary: existing.summary,
+              full_name: existing.full_name,
+            });
+          }
+          console.log(`[CALL ANALYZED] ${phone}: Upgraded → Full Name Verified - Right Party`);
+        } else if (cs.includes("wrong number") || cs.includes("wrong person")) {
           existing.status = "wrong_number";
           existing.disposition = getDispositionLabel("wrong_number");
           existing.summary = `Inferred: ${call.call_analysis.call_summary || ""}`;
