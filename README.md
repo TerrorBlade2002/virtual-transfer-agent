@@ -1,6 +1,10 @@
 # Retell VTA Inbound Webhook
 
-Webhook server that receives inbound calls from Retell AI, looks up customer data from a CSV file, and returns dynamic variables (full_name, ssn_last_two_digit) so the Voice AI agent can personalize its greeting.
+Webhook server for the Virtual Transfer Agent flow.
+
+- Keeps all existing Retell + TCN endpoints working.
+- Loads contacts from CSV into memory for fast webhook lookup.
+- Adds a simple campaign upload portal to preview CSV data, pick the name header, and load it live.
 
 ## How It Works
 
@@ -16,14 +20,15 @@ TCN Linkback → Retell Phone Number → Retell fires Inbound Webhook → This s
 
 ## Setup Instructions
 
-### 1. Prepare your contacts.csv
+### 1. Prepare your default contacts.csv
 
-Export your TCN campaign list and save it as `contacts.csv` with these columns:
-- `phone` — the customer's phone number (any format, digits are extracted automatically)
-- `full_name` — customer's full name
-- `ssn_last_two` — last two digits of SSN
+Default file is `./contacts.csv` (project root). This remains the fallback campaign.
 
-If your CSV has different column names, update the `CSV_COLUMNS` mapping in `server.js`.
+Expected campaign format:
+
+`FULL_NAME,FIRSTNAME,MASTERACCT,ACCOUNT,CLTREFNO,PHONE1,PHONE2,PHONE3,PHONE4,PHONE5,PHONE6`
+
+Every non-empty phone column (`PHONE1`-`PHONE6`) is normalized to last 10 digits and indexed.
 
 ### 2. Deploy to Railway (recommended for quick setup)
 
@@ -56,11 +61,53 @@ If your CSV has different column names, update the `CSV_COLUMNS` mapping in `ser
 3. Check server logs to confirm the webhook fired and returned correct data
 4. Verify Retell agent used the correct name in its greeting
 
-## Updating Contact Data
+## Campaign Upload Portal (new)
 
-Replace `contacts.csv` with your new campaign export and restart the server. The CSV is loaded into memory on startup for fast lookups.
+Open:
+
+- `/campaign-portal`
+
+Flow:
+
+1. Upload a CSV file.
+2. Click **Preview CSV** to view headers and sample rows.
+3. Select the header to use for Retell `{{full_name}}`.
+4. Click **Load Campaign**.
+
+What happens:
+
+- Uploaded file is saved under `./data/uploads`.
+- Contacts are reloaded in-memory immediately.
+- Active campaign state is persisted in `./data/campaign-state.json`.
+- Every loaded campaign gets a unique `campaignId` for observability.
+- Uploaded files older than 7 days are auto-deleted (except active campaign file).
+- On restart/redeploy, the server reloads the last selected campaign automatically.
+- If no uploaded campaign exists, it uses `contacts.csv`.
+
+Additional endpoints:
+
+- `GET /campaign-state`
+- `POST /campaign/preview`
+- `POST /campaign/load`
+
+`GET /campaign-state` includes:
+
+- current `campaignId`
+- active file + header
+- recent campaign history
+- retention policy
+
+## Railway deployment behavior
+
+- Loading a campaign already switches webhook data live immediately (no manual redeploy needed).
+- Rebuild/redeploy from Railway Source Repo is triggered by a new commit to `main`.
+- Optional: set `AUTO_RESTART_ON_CAMPAIGN_LOAD=true` to auto-restart the running instance after load (restart, not new build).
+- Keep `Healthcheck Path` as `/health`.
 
 ## Environment Variables (optional)
 
 - `PORT` — Server port (default: 3000)
-- `CSV_FILE` — Path to contacts CSV (default: ./contacts.csv)
+- `CSV_FILE` — Force a specific CSV path (overrides portal-selected campaign)
+- `DATA_DIR` — Directory for campaign state/uploads (use Railway volume mount path)
+- `CAMPAIGN_RETENTION_DAYS` — Upload retention (default: 7)
+- `AUTO_RESTART_ON_CAMPAIGN_LOAD` — `true` to auto-restart process after campaign load

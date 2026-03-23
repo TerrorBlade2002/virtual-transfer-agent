@@ -18,6 +18,8 @@ pnpm-debug.log*
 pids/
 *.pid
 *.pid.lock
+data/campaign-state.json
+data/uploads/
 
 # Coverage and reports
 coverage/
