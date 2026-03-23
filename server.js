@@ -708,11 +708,11 @@ function getCampaignPortalHtml() {
         if (!res.ok) throw new Error(data.error || "Load failed");
 
         showStatus(
-          "Campaign loaded.\n" +
-          "Campaign ID: " + data.campaignId + "\n" +
-          "Records: " + data.records + "\n" +
-          "Phone entries indexed: " + data.phoneEntries + "\n" +
-          "Name header: " + data.nameColumn + "\n" +
+          "Campaign loaded.\\n" +
+          "Campaign ID: " + data.campaignId + "\\n" +
+          "Records: " + data.records + "\\n" +
+          "Phone entries indexed: " + data.phoneEntries + "\\n" +
+          "Name header: " + data.nameColumn + "\\n" +
           "Active file: " + data.activeFile
         );
       } catch (err) {
@@ -975,59 +975,70 @@ app.post("/log-verification", (req, res) => {
 // ROUTE 3: TCN — GET VERIFICATION STATUS
 //
 // TCN Data Dip Key: whisper
-// All responses HTTP 200 — every call goes to Hunt Group.
+//
+// HTTP STATUS CODE STRATEGY (drives TCN branching):
+//   200 → verified / customer_wants_human → Action OK → Hunt Group (agent gets call)
+//   409 → wrong_number / third_party_end / dnc / other → Action Error → Hangup (no agent)
+//   404 → no result / customer_disconnected → Action Error → Hangup (no agent)
 // ============================================================
+
+// Statuses that should reach an agent
+const AGENT_STATUSES = new Set(["verified", "customer_wants_human"]);
+
 app.get("/verification-status", (req, res) => {
   const phone = req.query.phone || "";
   const normalized = normalizePhone(phone);
   const result = getVerification(normalized);
 
-  if (result) {
-    let whisper = "";
-
-    switch (result.status) {
-      case "verified":
-        whisper = `VERIFIED — ${result.full_name || "Customer"} confirmed identity.`;
-        break;
-      case "wrong_number":
-        whisper = `WRONG NUMBER — Not the right contact.`;
-        break;
-      case "third_party_end":
-        whisper = `THIRD PARTY END — Consumer unavailable.`;
-        break;
-      case "dnc":
-        whisper = `DNC — Customer requested Do Not Call.`;
-        break;
-      case "customer_wants_human":
-        whisper = `HUMAN REQUESTED — Customer wants live agent. Verify manually.`;
-        break;
-      case "other":
-        whisper = `OTHER — ${result.summary || "See disposition log."}`;
-        break;
-      case "customer_disconnected":
-        whisper = `CUSTOMER DISCONNECTED — Hung up before verification.`;
-        break;
-      default:
-        whisper = `VTA processed. Status: ${result.status}`;
-    }
-
-    console.log(`[TCN LOOKUP] ${normalized}: ${getDispositionLabel(result.status)}`);
-    return res.json({
-      found: true,
-      status: result.status,
-      disposition: getDispositionLabel(result.status),
-      whisper,
-      summary: result.summary,
-      full_name: result.full_name,
+  if (!result) {
+    console.log(`[TCN LOOKUP] ${normalized}: NOT FOUND → HTTP 404`);
+    return res.status(404).json({
+      found: false,
+      status: "unknown",
+      disposition: "Unknown",
+      whisper: "VTA — No verification data.",
     });
   }
 
-  console.log(`[TCN LOOKUP] ${normalized}: NOT FOUND`);
-  return res.json({
-    found: false,
-    status: "unknown",
-    disposition: "Unknown",
-    whisper: "VTA — No verification data. Verify manually.",
+  let whisper = "";
+
+  switch (result.status) {
+    case "verified":
+      whisper = `VERIFIED — ${result.full_name || "Customer"} confirmed identity.`;
+      break;
+    case "wrong_number":
+      whisper = `WRONG NUMBER — Not the right contact.`;
+      break;
+    case "third_party_end":
+      whisper = `THIRD PARTY END — Consumer unavailable.`;
+      break;
+    case "dnc":
+      whisper = `DNC — Customer requested Do Not Call.`;
+      break;
+    case "customer_wants_human":
+      whisper = `HUMAN REQUESTED — Customer wants live agent. Verify manually.`;
+      break;
+    case "other":
+      whisper = `OTHER — ${result.summary || "See disposition log."}`;
+      break;
+    case "customer_disconnected":
+      whisper = `CUSTOMER DISCONNECTED — Hung up before verification.`;
+      break;
+    default:
+      whisper = `VTA processed. Status: ${result.status}`;
+  }
+
+  const shouldReachAgent = AGENT_STATUSES.has(result.status);
+  const httpCode = shouldReachAgent ? 200 : 409;
+
+  console.log(`[TCN LOOKUP] ${normalized}: ${getDispositionLabel(result.status)} → HTTP ${httpCode}`);
+  return res.status(httpCode).json({
+    found: true,
+    status: result.status,
+    disposition: getDispositionLabel(result.status),
+    whisper,
+    summary: result.summary,
+    full_name: result.full_name,
   });
 });
 
