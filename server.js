@@ -61,7 +61,13 @@ const VERIFICATION_TTL = 5 * 60 * 1000;
 // 3. Disposition log
 const dispositionLog = [];
 
-// 4. Counters
+// 4. Linkback timing: phone → timestamp (ms)
+//    Written by TCN Data Dip BEFORE Linkback element
+//    Read by Retell inbound webhook to calculate SIP handshake time
+const linkbackTimestamps = new Map();
+const LINKBACK_TIMING_TTL = 2 * 60 * 1000; // 2 min expiry
+
+// 5. Counters
 let stats = {
   webhookCalls: 0,
   webhookHits: 0,
@@ -855,6 +861,23 @@ app.post("/campaign/load", async (req, res) => {
 });
 
 // ============================================================
+// ROUTE 0: TCN — LINKBACK TIMER (fire-and-forget)
+//
+// TCN Data Dip hits this BEFORE the Linkback element.
+// Records timestamp so we can calculate SIP handshake time
+// when the Retell webhook fires for the same phone.
+// ============================================================
+app.get("/linkback-start", (req, res) => {
+  const phone = normalizePhone(req.query.phone || "");
+  if (phone.length === 10) {
+    linkbackTimestamps.set(phone, Date.now());
+    setTimeout(() => linkbackTimestamps.delete(phone), LINKBACK_TIMING_TTL);
+    console.log(`[LINKBACK START] ${phone}: TCN about to dial Retell`);
+  }
+  res.json({ ok: true });
+});
+
+// ============================================================
 // ROUTE 1: RETELL INBOUND WEBHOOK
 // ============================================================
 app.post("/retell-webhook", (req, res) => {
@@ -870,6 +893,15 @@ app.post("/retell-webhook", (req, res) => {
 
   if (contact) {
     stats.webhookHits++;
+
+    // Calculate SIP handshake time if linkback-start was recorded
+    const linkbackStart = linkbackTimestamps.get(normalizedFrom);
+    if (linkbackStart) {
+      const sipHandshakeMs = Date.now() - linkbackStart;
+      console.log(`[SIP TIMING] ${normalizedFrom}: ${sipHandshakeMs}ms (TCN Linkback → Retell webhook)`);
+      linkbackTimestamps.delete(normalizedFrom);
+    }
+
     console.log(`  ✓ ${contact.full_name}`);
 
     return res.json({
@@ -888,6 +920,15 @@ app.post("/retell-webhook", (req, res) => {
   }
 
   stats.webhookMisses++;
+
+  // Still capture SIP timing even if contact not found
+  const linkbackStartMiss = linkbackTimestamps.get(normalizedFrom);
+  if (linkbackStartMiss) {
+    const sipHandshakeMs = Date.now() - linkbackStartMiss;
+    console.log(`[SIP TIMING] ${normalizedFrom}: ${sipHandshakeMs}ms (TCN Linkback → Retell webhook) [MISS]`);
+    linkbackTimestamps.delete(normalizedFrom);
+  }
+
   console.log(`  ✗ NOT FOUND`);
 
   return res.json({
@@ -1292,6 +1333,7 @@ loadContacts()
       console.log(`  POST /retell-call-ended      → Retell call ended/analyzed webhook`);
       console.log(`  GET  /dispositions           → View dispositions (JSON)`);
       console.log(`  GET  /dispositions/csv       → Download dispositions (CSV)`);
+      console.log(`  GET  /linkback-start          → TCN pre-linkback timer ping`);
       console.log(`  GET  /health                 → Health check`);
     });
   })
