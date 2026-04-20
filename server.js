@@ -34,6 +34,7 @@ const DISPOSITION_LABELS = {
   verified:              "Full Name Verified - Right Party",
   wrong_number:          "Wrong Number",
   third_party_end:       "Third party end of conversation",
+  consumer_busy_end:     "Consumer Busy - End Call",
   dnc:                   "DNC",
   customer_wants_human:  "Customer wants to talk to human",
   other:                 "Other",
@@ -77,6 +78,7 @@ let stats = {
   verifiedCount: 0,
   wrongNumberCount: 0,
   thirdPartyEndCount: 0,
+  consumerBusyEndCount: 0,
   dncCount: 0,
   customerWantsHumanCount: 0,
   otherCount: 0,
@@ -123,6 +125,7 @@ function incrementStatForStatus(status) {
     case "verified": stats.verifiedCount++; break;
     case "wrong_number": stats.wrongNumberCount++; break;
     case "third_party_end": stats.thirdPartyEndCount++; break;
+    case "consumer_busy_end": stats.consumerBusyEndCount++; break;
     case "dnc": stats.dncCount++; break;
     case "customer_wants_human": stats.customerWantsHumanCount++; break;
     case "other": stats.otherCount++; break;
@@ -949,7 +952,7 @@ app.post("/retell-webhook", (req, res) => {
 //
 // Valid statuses:
 //   verified, wrong_number, third_party_end,
-//   dnc, customer_wants_human, other
+//   consumer_busy_end, dnc, customer_wants_human, other
 // ============================================================
 app.post("/log-verification", (req, res) => {
   console.log(`[VERIFICATION] Full payload:`, JSON.stringify(req.body, null, 2));
@@ -1019,7 +1022,7 @@ app.post("/log-verification", (req, res) => {
 //
 // HTTP STATUS CODE STRATEGY (drives TCN branching):
 //   200 → verified / customer_wants_human → Action OK → Hunt Group (agent gets call)
-//   409 → wrong_number / third_party_end / dnc / other → Action Error → Hangup (no agent)
+//   409 → wrong_number / third_party_end / consumer_busy_end / dnc / other → Action Error → Hangup (no agent)
 //   404 → no result / customer_disconnected → Action Error → Hangup (no agent)
 // ============================================================
 
@@ -1052,6 +1055,9 @@ app.get("/verification-status", (req, res) => {
       break;
     case "third_party_end":
       whisper = `THIRD PARTY END — Consumer unavailable.`;
+      break;
+    case "consumer_busy_end":
+      whisper = `CONSUMER BUSY END — Consumer is busy; call back later.`;
       break;
     case "dnc":
       whisper = `DNC — Customer requested Do Not Call.`;
@@ -1198,6 +1204,25 @@ app.post("/retell-call-ended", (req, res) => {
           stats.customerDisconnectedCount--;
           stats.wrongNumberCount++;
           console.log(`[CALL ANALYZED] ${phone}: Upgraded → Wrong Number`);
+        } else if (
+          cs.includes("call back later")
+          || cs.includes("callback later")
+          || cs.includes("consumer was busy")
+          || cs.includes("customer was busy")
+          || cs.includes("consumer is busy")
+          || cs.includes("customer is busy")
+          || cs.includes("busy right now")
+          || (cs.includes("busy") && cs.includes("call back"))
+          || cs.includes("at work")
+          || cs.includes("driving")
+          || cs.includes("doctor appointment")
+        ) {
+          existing.status = "consumer_busy_end";
+          existing.disposition = getDispositionLabel("consumer_busy_end");
+          existing.summary = `Inferred: ${call.call_analysis.call_summary || ""}`;
+          stats.customerDisconnectedCount--;
+          stats.consumerBusyEndCount++;
+          console.log(`[CALL ANALYZED] ${phone}: Upgraded → Consumer Busy - End Call`);
         } else if (cs.includes("third party") || cs.includes("not available") || cs.includes("not home")) {
           existing.status = "third_party_end";
           existing.disposition = getDispositionLabel("third_party_end");
