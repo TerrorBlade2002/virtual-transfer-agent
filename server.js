@@ -1,10 +1,19 @@
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const csv = require("csv-parser");
+const multer = require("multer");
 
 const app = express();
 app.use(express.json({ limit: "25mb" }));
+
+// Multer instance for multipart CSV uploads. In-memory (25 MB cap) so we can
+// write the file atomically to its date-keyed destination ourselves.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB — matches express.json limit
+});
 
 // ============================================================
 // CONFIGURATION
@@ -24,6 +33,24 @@ const PORT = process.env.PORT || 3000;
 // Your CSV column mappings
 const PHONE_COLUMNS = ["PHONE1", "PHONE2", "PHONE3", "PHONE4", "PHONE5", "PHONE6"];
 const DEFAULT_NAME_COLUMN = "FULL_NAME"; // → Retell {{full_name}}
+
+// ============================================================
+// AUTH CONFIG
+//
+// Two-tier bearer auth for the NEW (date-keyed) endpoints.
+// Existing endpoints (/campaign/load, /dispositions, /dispositions/csv with
+// no date param, etc.) stay unauthenticated for backward compatibility.
+//
+//   CAMPAIGN_ADMIN_TOKEN  (env)  → single admin token; grants full admin access
+//   data/user-tokens.json        → list of hashed user tokens (upload + download)
+//
+// Clients pass either header:
+//   Authorization: Bearer <token>
+//   X-Campaign-Token: <token>
+// ============================================================
+const ADMIN_TOKEN = process.env.CAMPAIGN_ADMIN_TOKEN || "";
+const USER_TOKENS_FILE = path.resolve(DATA_DIR, "./user-tokens.json");
+const CAMPAIGN_TIMEZONE = "America/New_York"; // EST / EDT — DST-safe
 
 // ============================================================
 // DISPOSITION LABELS
@@ -86,6 +113,11 @@ let stats = {
 };
 
 // 5. Active campaign state (persisted for restart/redeploy)
+//
+// campaignsByDate (NEW): dateKey "YYYY-MM-DD" → metadata for that day's upload.
+// One file per date; re-uploading for the same date overwrites the previous one.
+// Entries >7 days old are pruned. Default contacts.csv is the fallback when
+// today has no upload.
 let campaignState = {
   campaign_id: "default-contacts",
   csv_file: DEFAULT_CSV_FILE,
@@ -93,7 +125,12 @@ let campaignState = {
   uploaded_at: null,
   headers: [],
   history: [],
+  campaignsByDate: {},
 };
+
+// Tracks which date-keyed campaign is currently live in the `contacts` Map.
+// Used to avoid re-loading the same file repeatedly and to detect rollover.
+let activeCampaignDate = null;
 
 // ============================================================
 // HELPERS
@@ -184,11 +221,40 @@ function pruneOldUploadedCampaigns() {
     });
   }
 
-  if (deleted > 0) {
+  // Also prune date-keyed entries: any YYYY-MM-DD older than retention window
+  // (using Eastern-time "today" as the reference so the behaviour is stable
+  // across UTC/local boundaries).
+  let dateKeyedDeleted = 0;
+  if (campaignState.campaignsByDate && typeof campaignState.campaignsByDate === "object") {
+    const today = getEasternDateString();
+    const next = {};
+    for (const [dateKey, meta] of Object.entries(campaignState.campaignsByDate)) {
+      if (!isValidDateString(dateKey)) continue; // drop malformed keys
+      const ageDays = daysBetweenEasternDates(today, dateKey);
+      if (ageDays > CAMPAIGN_RETENTION_DAYS) {
+        const filePath = csvAbsolutePathForDate(dateKey);
+        try {
+          if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+            dateKeyedDeleted++;
+            console.log(`[CAMPAIGN CLEANUP] Deleted expired date-keyed upload: ${path.basename(filePath)}`);
+          }
+        } catch (err) {
+          console.error(`[CAMPAIGN CLEANUP] Failed to delete ${filePath}: ${err.message}`);
+        }
+        // drop the entry from the map regardless
+      } else {
+        next[dateKey] = meta;
+      }
+    }
+    campaignState.campaignsByDate = next;
+  }
+
+  if (deleted > 0 || dateKeyedDeleted > 0) {
     saveCampaignState();
   }
 
-  return { checked, deleted };
+  return { checked, deleted: deleted + dateKeyedDeleted };
 }
 
 function ensureDirectories() {
@@ -243,6 +309,7 @@ function loadCampaignStateFromDisk() {
       uploaded_at: null,
       headers: [],
       history: [],
+      campaignsByDate: {},
     };
     console.log(`[CAMPAIGN] Using CSV_FILE override: ${CSV_FILE_OVERRIDE}`);
     return;
@@ -258,6 +325,7 @@ function loadCampaignStateFromDisk() {
       uploaded_at: null,
       headers: [],
       history: [],
+      campaignsByDate: {},
     };
     return;
   }
@@ -272,6 +340,9 @@ function loadCampaignStateFromDisk() {
       uploaded_at: state.uploaded_at || null,
       headers: Array.isArray(state.headers) ? state.headers : [],
       history: Array.isArray(state.history) ? state.history : [],
+      campaignsByDate: (state.campaignsByDate && typeof state.campaignsByDate === "object")
+        ? state.campaignsByDate
+        : {},
     };
 
     if (!fs.existsSync(campaignState.csv_file)) {
@@ -283,6 +354,7 @@ function loadCampaignStateFromDisk() {
         uploaded_at: null,
         headers: [],
         history: campaignState.history,
+        campaignsByDate: campaignState.campaignsByDate || {},
       };
       saveCampaignState();
     }
@@ -295,6 +367,7 @@ function loadCampaignStateFromDisk() {
       uploaded_at: null,
       headers: [],
       history: [],
+      campaignsByDate: {},
     };
   }
 }
@@ -405,6 +478,195 @@ async function loadContacts() {
   console.log(`[CAMPAIGN] Active campaign ID: ${campaignState.campaign_id}`);
   console.log(`[CAMPAIGN] Active file: ${campaignState.csv_file}`);
   console.log(`[CAMPAIGN] Name column: ${campaignState.name_column}`);
+}
+
+// ============================================================
+// TIMEZONE + DATE HELPERS (Eastern Time, DST-safe)
+// ============================================================
+function getEasternDateString(d = new Date()) {
+  // Returns "YYYY-MM-DD" for the current moment in America/New_York.
+  // en-CA locale happens to yield ISO "YYYY-MM-DD" format directly.
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: CAMPAIGN_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  return fmt.format(d);
+}
+
+function isValidDateString(s) {
+  if (typeof s !== "string") return false;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [y, m, d] = s.split("-").map(Number);
+  if (m < 1 || m > 12 || d < 1 || d > 31) return false;
+  // round-trip check for invalid days (e.g., Feb 30)
+  const iso = `${y.toString().padStart(4, "0")}-${m.toString().padStart(2, "0")}-${d.toString().padStart(2, "0")}`;
+  return iso === s;
+}
+
+function daysBetweenEasternDates(a, b) {
+  // Signed day count (a - b) using pure date arithmetic on the strings.
+  const [y1, m1, d1] = a.split("-").map(Number);
+  const [y2, m2, d2] = b.split("-").map(Number);
+  const t1 = Date.UTC(y1, m1 - 1, d1);
+  const t2 = Date.UTC(y2, m2 - 1, d2);
+  return Math.round((t1 - t2) / (24 * 60 * 60 * 1000));
+}
+
+function csvFileNameForDate(dateStr) {
+  return `campaign-${dateStr}.csv`;
+}
+
+function csvAbsolutePathForDate(dateStr) {
+  return path.resolve(CAMPAIGN_UPLOADS_DIR, csvFileNameForDate(dateStr));
+}
+
+// ============================================================
+// USER TOKEN STORE
+//
+// File: data/user-tokens.json
+// Shape: { tokens: [ { id, hash, label, created_at, created_by } ] }
+// The plaintext token is returned ONCE at creation and never stored.
+// ============================================================
+function hashToken(plaintext) {
+  return crypto.createHash("sha256").update(String(plaintext)).digest("hex");
+}
+
+function generateToken() {
+  return crypto.randomBytes(32).toString("hex"); // 64 hex chars
+}
+
+function loadUserTokens() {
+  try {
+    if (!fs.existsSync(USER_TOKENS_FILE)) return { tokens: [] };
+    const raw = fs.readFileSync(USER_TOKENS_FILE, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.tokens)) return { tokens: [] };
+    return parsed;
+  } catch (err) {
+    console.error(`[AUTH] Failed to read user tokens file: ${err.message}`);
+    return { tokens: [] };
+  }
+}
+
+function saveUserTokens(store) {
+  try {
+    ensureDirectories();
+    fs.writeFileSync(USER_TOKENS_FILE, JSON.stringify(store, null, 2), "utf-8");
+  } catch (err) {
+    console.error(`[AUTH] Failed to write user tokens file: ${err.message}`);
+  }
+}
+
+// ============================================================
+// AUTH MIDDLEWARE
+// ============================================================
+function extractToken(req) {
+  const auth = req.headers["authorization"] || "";
+  if (auth.toLowerCase().startsWith("bearer ")) {
+    return auth.slice(7).trim();
+  }
+  const xTok = req.headers["x-campaign-token"];
+  if (typeof xTok === "string" && xTok.trim()) return xTok.trim();
+  return "";
+}
+
+function safeEqual(a, b) {
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function authenticate(req) {
+  const presented = extractToken(req);
+  if (!presented) return null;
+
+  if (ADMIN_TOKEN && safeEqual(presented, ADMIN_TOKEN)) {
+    return { role: "admin", tokenId: "admin", label: "admin" };
+  }
+
+  const store = loadUserTokens();
+  const presentedHash = hashToken(presented);
+  const match = store.tokens.find((t) => safeEqual(t.hash, presentedHash));
+  if (match) {
+    return { role: "user", tokenId: match.id, label: match.label || match.id };
+  }
+  return null;
+}
+
+function requireAuth(req, res, next) {
+  const who = authenticate(req);
+  if (!who) {
+    return res.status(401).json({ error: "Unauthorized — provide Authorization: Bearer <token> or X-Campaign-Token header" });
+  }
+  req.auth = who;
+  next();
+}
+
+function requireAdmin(req, res, next) {
+  const who = authenticate(req);
+  if (!who) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  if (who.role !== "admin") {
+    return res.status(403).json({ error: "Admin only" });
+  }
+  req.auth = who;
+  next();
+}
+
+// ============================================================
+// DATE-KEYED CAMPAIGN ACTIVATION
+//
+// At request time (and via safety-net timer), if today's ET date has an
+// uploaded campaign and that campaign isn't currently active, swap the
+// in-memory contacts map to it. Idempotent — safe to call on every
+// webhook hit (no-op when already loaded for today).
+// ============================================================
+async function ensureActiveCampaignForToday() {
+  try {
+    const today = getEasternDateString();
+    if (activeCampaignDate === today) return; // already live
+
+    const byDate = campaignState.campaignsByDate || {};
+    const entry = byDate[today];
+    if (!entry) return; // no upload for today → leave current active file alone
+
+    const filePath = csvAbsolutePathForDate(today);
+    if (!fs.existsSync(filePath)) {
+      console.warn(`[CAMPAIGN] campaignsByDate says ${today} exists but file missing: ${filePath}`);
+      return;
+    }
+
+    const nameColumn = entry.name_column || DEFAULT_NAME_COLUMN;
+    const { nextContacts, records, phoneEntries, headers } =
+      await buildContactsMapFromCsv(filePath, nameColumn);
+
+    contacts.clear();
+    for (const [k, v] of nextContacts.entries()) {
+      contacts.set(k, v);
+    }
+
+    activeCampaignDate = today;
+
+    campaignState = {
+      ...campaignState,
+      campaign_id: `date-${today}`,
+      csv_file: filePath,
+      name_column: detectNameColumn(headers, nameColumn),
+      uploaded_at: entry.uploaded_at || campaignState.uploaded_at,
+      headers,
+      campaignsByDate: byDate,
+    };
+    saveCampaignState();
+
+    console.log(`[CAMPAIGN] Auto-activated today's (${today}) campaign: ${records} records, ${phoneEntries} phone entries`);
+  } catch (err) {
+    console.error(`[CAMPAIGN] ensureActiveCampaignForToday failed: ${err.message}`);
+    // Never throw — webhook must still work even if activation fails.
+  }
 }
 
 function escapeHtml(value) {
@@ -887,6 +1149,11 @@ app.post("/retell-webhook", (req, res) => {
   stats.webhookCalls++;
   stats.lastCall = new Date().toISOString();
 
+  // Auto-activate today's date-keyed campaign if uploaded. Fire-and-forget
+  // on first hit of the day; subsequent hits are no-ops. Errors are swallowed
+  // inside the helper so the webhook always responds.
+  ensureActiveCampaignForToday().catch(() => {});
+
   const fromNumber = req.body?.call_inbound?.from_number || "";
   const normalizedFrom = normalizePhone(fromNumber);
 
@@ -1278,6 +1545,61 @@ app.get("/dispositions", (req, res) => {
 });
 
 app.get("/dispositions/csv", (req, res) => {
+  const rawDate = req.query?.date;
+  const hasDateParam = typeof rawDate === "string" && rawDate.length > 0;
+
+  // DATE-FILTERED VARIANT — requires auth (user or admin); single date only.
+  // Query param `date` must be YYYY-MM-DD; filters by Eastern-time day.
+  if (hasDateParam) {
+    const who = authenticate(req);
+    if (!who) {
+      return res.status(401).json({ error: "Date-filtered dispositions require Authorization: Bearer <token>" });
+    }
+
+    const dateStr = String(rawDate).trim();
+    if (!isValidDateString(dateStr)) {
+      return res.status(400).json({ error: `Invalid date: '${dateStr}'. Expected YYYY-MM-DD.` });
+    }
+
+    // Reject multiple values (express may pass array if ?date=a&date=b)
+    if (Array.isArray(req.query.date)) {
+      return res.status(400).json({ error: "Only a single date is allowed per download" });
+    }
+
+    const withStatus = dispositionLog.filter((d) => {
+      if (!d.status || !d.timestamp) return false;
+      try {
+        return getEasternDateString(new Date(d.timestamp)) === dateStr;
+      } catch {
+        return false;
+      }
+    });
+
+    const header = "timestamp,phone,disposition,status,summary,full_name,call_id,duration_ms,disconnect_reason,source\n";
+    const rows = withStatus.map((d) =>
+      [
+        d.timestamp || "",
+        d.phone || "",
+        getDispositionLabel(d.status),
+        d.status || "",
+        (d.summary || "").replace(/,/g, ";").replace(/\n/g, " "),
+        (d.full_name || "").replace(/,/g, ";"),
+        d.call_id || "",
+        d.duration_ms || "",
+        d.disconnect_reason || "",
+        d.source || "",
+      ].join(",")
+    ).join("\n");
+
+    console.log(`[DISPOSITIONS CSV] ${who.role}:${who.label} downloaded ${dateStr} (${withStatus.length} rows)`);
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename=vta-dispositions-${dateStr}.csv`);
+    return res.send(header + rows);
+  }
+
+  // LEGACY VARIANT — no date param, no auth. Returns ALL dispositions.
+  // Preserved for backward compatibility with existing consumers.
   const withStatus = dispositionLog.filter((d) => d.status);
 
   const header = "timestamp,phone,disposition,status,summary,full_name,call_id,duration_ms,disconnect_reason,source\n";
@@ -1302,6 +1624,382 @@ app.get("/dispositions/csv", (req, res) => {
 });
 
 // ============================================================
+// ROUTE 6: DATE-KEYED CAMPAIGN UPLOAD (multipart, auth required)
+//
+// POST /campaign/upload
+//   Headers: Authorization: Bearer <token>  (user or admin)
+//   Form fields (multipart/form-data):
+//     file        (required) — the CSV file
+//     date        (required) — YYYY-MM-DD; broadcast date the CSV is for
+//     nameColumn  (optional) — overrides auto-detection
+//
+// Overwrites any existing CSV already uploaded for the same date.
+// Does NOT immediately become the active campaign — the file is activated
+// automatically when today's ET date matches (via ensureActiveCampaignForToday).
+// To activate immediately, admins can call POST /campaign/activate?date=...
+// ============================================================
+app.post("/campaign/upload", requireAuth, upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ error: "file is required (multipart field 'file')" });
+    }
+
+    const dateStr = String(req.body?.date || "").trim();
+    if (!dateStr) {
+      return res.status(400).json({ error: "date is required (YYYY-MM-DD, broadcast date in Eastern time)" });
+    }
+    if (!isValidDateString(dateStr)) {
+      return res.status(400).json({ error: `Invalid date: '${dateStr}'. Expected YYYY-MM-DD.` });
+    }
+
+    const csvContent = req.file.buffer.toString("utf-8").replace(/^\uFEFF/, "");
+    if (!csvContent.trim()) {
+      return res.status(400).json({ error: "Uploaded file is empty" });
+    }
+
+    // Parse headers first (for name-column detection and validation).
+    const preview = await parseCsvPreview(csvContent, 1);
+    if (!preview.headers.length) {
+      return res.status(400).json({ error: "CSV has no header row" });
+    }
+
+    const requestedNameColumn = String(req.body?.nameColumn || "").trim();
+    const selectedNameColumn = detectNameColumn(preview.headers, requestedNameColumn);
+
+    // Persist to disk atomically. Write to .tmp first, then rename — overwrites
+    // any existing file for the same date in a single filesystem operation.
+    ensureDirectories();
+    const targetPath = csvAbsolutePathForDate(dateStr);
+    const tmpPath = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
+    fs.writeFileSync(tmpPath, csvContent, "utf-8");
+    fs.renameSync(tmpPath, targetPath);
+
+    // Build the contacts map off the stored file (validates end-to-end).
+    const { nextContacts, records, phoneEntries, headers } =
+      await buildContactsMapFromCsv(targetPath, selectedNameColumn);
+
+    if (records === 0) {
+      try { fs.unlinkSync(targetPath); } catch {}
+      return res.status(400).json({ error: "CSV parsed but contained 0 rows" });
+    }
+    if (phoneEntries === 0) {
+      try { fs.unlinkSync(targetPath); } catch {}
+      return res.status(400).json({
+        error: "CSV parsed but no valid phone numbers were found. Expected at least one of: " + PHONE_COLUMNS.join(", "),
+      });
+    }
+
+    // Record the upload in state.
+    const byDate = campaignState.campaignsByDate || {};
+    const existing = byDate[dateStr];
+    const overwritten = Boolean(existing);
+    const originalFileName = String(req.file.originalname || "uploaded.csv");
+    byDate[dateStr] = {
+      file_name: csvFileNameForDate(dateStr),
+      original_file_name: originalFileName,
+      uploaded_at: new Date().toISOString(),
+      uploaded_by: req.auth.label || req.auth.tokenId,
+      uploader_role: req.auth.role,
+      name_column: selectedNameColumn,
+      records,
+      phone_entries: phoneEntries,
+      headers,
+    };
+    campaignState.campaignsByDate = byDate;
+    saveCampaignState();
+
+    // If the uploaded date is today (ET), activate immediately.
+    const today = getEasternDateString();
+    let activatedNow = false;
+    if (dateStr === today) {
+      contacts.clear();
+      for (const [k, v] of nextContacts.entries()) {
+        contacts.set(k, v);
+      }
+      activeCampaignDate = today;
+      campaignState = {
+        ...campaignState,
+        campaign_id: `date-${today}`,
+        csv_file: targetPath,
+        name_column: selectedNameColumn,
+        uploaded_at: byDate[today].uploaded_at,
+        headers,
+      };
+      saveCampaignState();
+      activatedNow = true;
+      console.log(`[CAMPAIGN UPLOAD] ${req.auth.label} uploaded for TODAY (${today}) — activated immediately (${records} records, ${phoneEntries} phones)`);
+    } else {
+      console.log(`[CAMPAIGN UPLOAD] ${req.auth.label} uploaded for ${dateStr} (${records} records, ${phoneEntries} phones)${overwritten ? " [OVERWROTE PREVIOUS]" : ""}`);
+    }
+
+    pruneOldUploadedCampaigns();
+
+    return res.json({
+      success: true,
+      date: dateStr,
+      overwritten,
+      activatedNow,
+      willActivateOn: activatedNow ? null : `${dateStr} (first webhook hit in America/New_York)`,
+      records,
+      phoneEntries,
+      nameColumn: selectedNameColumn,
+      fileName: csvFileNameForDate(dateStr),
+      originalFileName,
+      uploadedBy: req.auth.label || req.auth.tokenId,
+    });
+  } catch (err) {
+    console.error(`[CAMPAIGN UPLOAD] Error: ${err.message}`);
+    return res.status(500).json({ error: `Upload failed: ${err.message}` });
+  }
+});
+
+// Force-activate a previously uploaded date's campaign (admin only).
+// Useful to test a future date's list right now without waiting for ET rollover.
+app.post("/campaign/activate", requireAdmin, async (req, res) => {
+  try {
+    const dateStr = String(req.query?.date || req.body?.date || "").trim();
+    if (!isValidDateString(dateStr)) {
+      return res.status(400).json({ error: "date query param required (YYYY-MM-DD)" });
+    }
+
+    const entry = (campaignState.campaignsByDate || {})[dateStr];
+    if (!entry) {
+      return res.status(404).json({ error: `No uploaded campaign for ${dateStr}` });
+    }
+
+    const filePath = csvAbsolutePathForDate(dateStr);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: `File missing on disk for ${dateStr}` });
+    }
+
+    const nameColumn = entry.name_column || DEFAULT_NAME_COLUMN;
+    const { nextContacts, records, phoneEntries, headers } =
+      await buildContactsMapFromCsv(filePath, nameColumn);
+
+    contacts.clear();
+    for (const [k, v] of nextContacts.entries()) {
+      contacts.set(k, v);
+    }
+    activeCampaignDate = dateStr;
+    campaignState = {
+      ...campaignState,
+      campaign_id: `date-${dateStr}`,
+      csv_file: filePath,
+      name_column: detectNameColumn(headers, nameColumn),
+      uploaded_at: entry.uploaded_at,
+      headers,
+    };
+    saveCampaignState();
+
+    console.log(`[CAMPAIGN ACTIVATE] Admin force-activated ${dateStr} (${records} records, ${phoneEntries} phones)`);
+    return res.json({
+      success: true,
+      activated: dateStr,
+      records,
+      phoneEntries,
+      nameColumn: campaignState.name_column,
+    });
+  } catch (err) {
+    console.error(`[CAMPAIGN ACTIVATE] Error: ${err.message}`);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// ROUTE 7: ADMIN — VIEW / DELETE DATE-KEYED UPLOADS
+// ============================================================
+app.get("/admin/uploads", requireAdmin, (req, res) => {
+  const today = getEasternDateString();
+  const byDate = campaignState.campaignsByDate || {};
+  const uploads = Object.entries(byDate)
+    .map(([dateKey, meta]) => {
+      const filePath = csvAbsolutePathForDate(dateKey);
+      const onDisk = fs.existsSync(filePath);
+      let fileSize = null;
+      let mtime = null;
+      if (onDisk) {
+        try {
+          const st = fs.statSync(filePath);
+          fileSize = st.size;
+          mtime = new Date(st.mtimeMs).toISOString();
+        } catch {}
+      }
+      const ageDays = daysBetweenEasternDates(today, dateKey);
+      return {
+        date: dateKey,
+        file_name: meta.file_name,
+        original_file_name: meta.original_file_name,
+        uploaded_at: meta.uploaded_at,
+        uploaded_by: meta.uploaded_by,
+        name_column: meta.name_column,
+        records: meta.records,
+        phone_entries: meta.phone_entries,
+        on_disk: onDisk,
+        file_size_bytes: fileSize,
+        file_mtime: mtime,
+        age_days_et: ageDays,
+        is_active: activeCampaignDate === dateKey,
+        is_today: dateKey === today,
+      };
+    })
+    .sort((a, b) => (a.date < b.date ? 1 : -1));
+
+  res.json({
+    timezone: CAMPAIGN_TIMEZONE,
+    today_et: today,
+    retention_days: CAMPAIGN_RETENTION_DAYS,
+    active_campaign_date: activeCampaignDate,
+    total: uploads.length,
+    uploads,
+  });
+});
+
+app.delete("/admin/uploads/:date", requireAdmin, (req, res) => {
+  const dateStr = String(req.params.date || "").trim();
+  if (!isValidDateString(dateStr)) {
+    return res.status(400).json({ error: "Invalid date format (YYYY-MM-DD)" });
+  }
+
+  const byDate = campaignState.campaignsByDate || {};
+  const entry = byDate[dateStr];
+  if (!entry) {
+    return res.status(404).json({ error: `No uploaded campaign for ${dateStr}` });
+  }
+
+  const filePath = csvAbsolutePathForDate(dateStr);
+  let fileDeleted = false;
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+      fileDeleted = true;
+    }
+  } catch (err) {
+    console.error(`[ADMIN DELETE] Failed to delete ${filePath}: ${err.message}`);
+    return res.status(500).json({ error: `Failed to delete file: ${err.message}` });
+  }
+
+  delete byDate[dateStr];
+  campaignState.campaignsByDate = byDate;
+
+  // If the deleted date is the currently-active campaign, fall back to
+  // default contacts.csv and reload the in-memory map. This prevents the
+  // webhook from pointing at a now-missing file.
+  let fallbackLoaded = false;
+  if (activeCampaignDate === dateStr) {
+    activeCampaignDate = null;
+    if (fs.existsSync(DEFAULT_CSV_FILE)) {
+      try {
+        buildContactsMapFromCsv(DEFAULT_CSV_FILE, DEFAULT_NAME_COLUMN).then(
+          ({ nextContacts, records, phoneEntries, headers }) => {
+            contacts.clear();
+            for (const [k, v] of nextContacts.entries()) contacts.set(k, v);
+            campaignState = {
+              ...campaignState,
+              campaign_id: "default-contacts",
+              csv_file: DEFAULT_CSV_FILE,
+              name_column: DEFAULT_NAME_COLUMN,
+              uploaded_at: null,
+              headers,
+            };
+            saveCampaignState();
+            console.log(`[ADMIN DELETE] Fell back to default contacts.csv (${records} records, ${phoneEntries} phones)`);
+          }
+        ).catch((e) => console.error(`[ADMIN DELETE] Fallback load failed: ${e.message}`));
+        fallbackLoaded = true;
+      } catch (e) {
+        console.error(`[ADMIN DELETE] Fallback scheduling failed: ${e.message}`);
+      }
+    }
+  }
+
+  saveCampaignState();
+  console.log(`[ADMIN DELETE] Admin deleted date-keyed upload for ${dateStr}`);
+
+  return res.json({
+    success: true,
+    date: dateStr,
+    file_deleted: fileDeleted,
+    fallback_triggered: fallbackLoaded,
+  });
+});
+
+// ============================================================
+// ROUTE 8: ADMIN — USER TOKEN MANAGEMENT
+//
+// Admin-only. Create / list / revoke user tokens that can upload campaigns
+// and download dispositions. Plaintext token is returned exactly once at
+// creation time (like an API-key flow). We only store SHA-256 hashes on disk.
+// ============================================================
+app.get("/admin/users", requireAdmin, (req, res) => {
+  const store = loadUserTokens();
+  const tokens = store.tokens.map((t) => ({
+    id: t.id,
+    label: t.label,
+    created_at: t.created_at,
+    created_by: t.created_by,
+    // last-4 of hash for quick visual diff, never the token itself
+    hash_last4: String(t.hash || "").slice(-4),
+  }));
+  res.json({ total: tokens.length, tokens });
+});
+
+app.post("/admin/users", requireAdmin, (req, res) => {
+  const label = String(req.body?.label || "").trim();
+  if (!label) {
+    return res.status(400).json({ error: "label is required" });
+  }
+  const store = loadUserTokens();
+  if (store.tokens.some((t) => t.label === label)) {
+    return res.status(409).json({ error: `A token with label '${label}' already exists` });
+  }
+
+  const plaintext = generateToken();
+  const id = `usr_${crypto.randomBytes(8).toString("hex")}`;
+  const record = {
+    id,
+    label,
+    hash: hashToken(plaintext),
+    created_at: new Date().toISOString(),
+    created_by: req.auth.label || req.auth.tokenId,
+  };
+  store.tokens.push(record);
+  saveUserTokens(store);
+
+  console.log(`[ADMIN USERS] Admin created token ${id} (${label})`);
+  res.status(201).json({
+    id,
+    label,
+    token: plaintext, // returned ONCE; store it securely
+    note: "This plaintext token is shown only once. Store it now — it cannot be retrieved later.",
+  });
+});
+
+app.delete("/admin/users/:id", requireAdmin, (req, res) => {
+  const id = String(req.params.id || "").trim();
+  const store = loadUserTokens();
+  const before = store.tokens.length;
+  store.tokens = store.tokens.filter((t) => t.id !== id);
+  if (store.tokens.length === before) {
+    return res.status(404).json({ error: `No token with id ${id}` });
+  }
+  saveUserTokens(store);
+  console.log(`[ADMIN USERS] Admin revoked token ${id}`);
+  res.json({ success: true, revoked: id });
+});
+
+// ============================================================
+// ROUTE 9: AUTH IDENTITY — who am I?
+// Convenience for the caller to verify their token works and see their role.
+// ============================================================
+app.get("/auth/whoami", requireAuth, (req, res) => {
+  res.json({
+    role: req.auth.role,
+    tokenId: req.auth.tokenId,
+    label: req.auth.label,
+  });
+});
+
+// ============================================================
 // HEALTH CHECK
 // ============================================================
 app.get("/health", (req, res) => {
@@ -1323,7 +2021,7 @@ app.get("/health", (req, res) => {
 // STARTUP
 // ============================================================
 loadContacts()
-  .then(() => {
+  .then(async () => {
     if (!CSV_FILE_OVERRIDE) {
       const cleanupResult = pruneOldUploadedCampaigns();
       console.log(`[CAMPAIGN CLEANUP] Startup check complete. Checked: ${cleanupResult.checked}, Deleted: ${cleanupResult.deleted}`);
@@ -1333,6 +2031,16 @@ loadContacts()
           console.log(`[CAMPAIGN CLEANUP] Interval run. Checked: ${result.checked}, Deleted: ${result.deleted}`);
         }
       }, 6 * 60 * 60 * 1000);
+
+      // If there's already a date-keyed upload for today's ET date, swap to it
+      // on boot (e.g., after a Railway redeploy mid-day).
+      await ensureActiveCampaignForToday();
+
+      // Safety-net: re-check every 10 minutes so rollover across midnight ET
+      // picks up the next day's campaign even if no webhook fires right at 00:00.
+      setInterval(() => {
+        ensureActiveCampaignForToday().catch(() => {});
+      }, 10 * 60 * 1000);
     }
 
     app.listen(PORT, () => {
@@ -1357,9 +2065,23 @@ loadContacts()
       console.log(`  GET  /verification-status    → TCN reads verification result`);
       console.log(`  POST /retell-call-ended      → Retell call ended/analyzed webhook`);
       console.log(`  GET  /dispositions           → View dispositions (JSON)`);
-      console.log(`  GET  /dispositions/csv       → Download dispositions (CSV)`);
+      console.log(`  GET  /dispositions/csv       → Download dispositions (CSV; add ?date=YYYY-MM-DD + auth for per-day)`);
       console.log(`  GET  /linkback-start          → TCN pre-linkback timer ping`);
       console.log(`  GET  /health                 → Health check`);
+      console.log(`  POST /campaign/upload        → [auth] Upload date-keyed CSV (multipart, date required)`);
+      console.log(`  POST /campaign/activate      → [admin] Force-activate ?date=YYYY-MM-DD now`);
+      console.log(`  GET  /admin/uploads          → [admin] List all date-keyed uploads`);
+      console.log(`  DEL  /admin/uploads/:date    → [admin] Delete a specific date's CSV`);
+      console.log(`  GET  /admin/users            → [admin] List user tokens`);
+      console.log(`  POST /admin/users            → [admin] Create user token (returns plaintext once)`);
+      console.log(`  DEL  /admin/users/:id        → [admin] Revoke a user token`);
+      console.log(`  GET  /auth/whoami            → [auth]  Inspect the presented token's role`);
+      if (!ADMIN_TOKEN) {
+        console.log(`\n⚠  CAMPAIGN_ADMIN_TOKEN env var is NOT set — admin endpoints are unreachable.`);
+        console.log(`   Set it in Railway to enable admin access. Date-keyed uploads and downloads are still protected by user tokens.`);
+      } else {
+        console.log(`\n✓ Admin auth: CAMPAIGN_ADMIN_TOKEN set (${ADMIN_TOKEN.length} chars)`);
+      }
     });
   })
   .catch((err) => {

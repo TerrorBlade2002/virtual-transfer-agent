@@ -20,6 +20,7 @@ pids/
 *.pid.lock
 data/campaign-state.json
 data/uploads/
+data/user-tokens.json
 
 # Coverage and reports
 coverage/
