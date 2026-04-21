@@ -1,3 +1,7 @@
+// Load local .env for dev. On Railway, no .env file exists so dotenv silently
+// no-ops and the env vars injected by the Railway UI are used instead.
+require("dotenv").config();
+
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
