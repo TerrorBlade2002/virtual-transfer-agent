@@ -149,6 +149,12 @@ function normalizePhone(phone) {
   return digits.slice(-10);
 }
 
+function totalContactEntries() {
+  let n = 0;
+  for (const arr of contacts.values()) n += arr.length;
+  return n;
+}
+
 function storeVerification(phone, data) {
   const normalized = normalizePhone(phone);
   verificationResults.set(normalized, { ...data, timestamp: Date.now() });
@@ -648,7 +654,8 @@ function buildContactsMapFromCsv(csvFilePath, nameColumn) {
           const phone = normalizePhone(rawPhone);
           if (phone.length !== 10) continue;
 
-          nextContacts.set(phone, {
+          if (!nextContacts.has(phone)) nextContacts.set(phone, []);
+          nextContacts.get(phone).push({
             full_name: chosenName,
             raw_record: {
               full_name_original: (row[DEFAULT_NAME_COLUMN] || "").trim(),
@@ -1493,7 +1500,8 @@ app.get("/campaign-state", (req, res) => {
     activeFileName: path.basename(campaignState.csv_file || DEFAULT_CSV_FILE),
     nameColumn: campaignState.name_column || DEFAULT_NAME_COLUMN,
     headers: campaignState.headers || [],
-    contactsLoaded: contacts.size,
+    contactsLoaded: totalContactEntries(),
+    uniquePhones: contacts.size,
     uploadedAt: campaignState.uploaded_at,
     retentionDays: CAMPAIGN_RETENTION_DAYS,
     recentCampaigns: (campaignState.history || []).slice(0, 10),
@@ -1641,7 +1649,8 @@ app.post("/retell-webhook", (req, res) => {
 
   console.log(`[WEBHOOK] ${fromNumber} → ${normalizedFrom}`);
 
-  const contact = contacts.get(normalizedFrom);
+  const queue = contacts.get(normalizedFrom);
+  const contact = Array.isArray(queue) && queue.length > 0 ? queue[0] : null;
 
   if (contact) {
     stats.webhookHits++;
@@ -1654,7 +1663,7 @@ app.post("/retell-webhook", (req, res) => {
       linkbackTimestamps.delete(normalizedFrom);
     }
 
-    console.log(`  ✓ ${contact.full_name}`);
+    console.log(`  ✓ ${contact.full_name} (${queue.length} remaining for this phone)`);
 
     return res.json({
       call_inbound: {
@@ -1745,6 +1754,17 @@ app.post("/log-verification", (req, res) => {
   });
 
   console.log(`[VERIFICATION] ${phoneKey}: ${getDispositionLabel(status)} — ${summary || ""}`);
+
+  // Queue rotation: pop the front entry so the next call to this phone
+  // serves the next person in the CSV.
+  if (phoneKey !== "unknown") {
+    const queue = contacts.get(phoneKey);
+    if (Array.isArray(queue) && queue.length > 0) {
+      const consumed = queue.shift();
+      console.log(`[QUEUE] ${phoneKey}: consumed "${consumed.full_name}" — ${queue.length} remaining`);
+      if (queue.length === 0) contacts.delete(phoneKey);
+    }
+  }
 
   // Race condition fix: if call_ended arrived first and created a
   // "customer_disconnected" fallback, overwrite it with real status.
@@ -1877,7 +1897,8 @@ app.post("/retell-call-ended", (req, res) => {
       console.log(`[CALL ENDED] ${phone}: Verification exists — enriched with metadata`);
     } else {
       // FALLBACK: Customer hung up before log_verification.
-      const contactInfo = phone.length === 10 ? contacts.get(phone) : null;
+      const fallbackQueue = phone.length === 10 ? contacts.get(phone) : null;
+      const contactInfo = Array.isArray(fallbackQueue) && fallbackQueue.length > 0 ? fallbackQueue[0] : null;
 
       appendDispositionEntry({
         phone: phone || "unknown",
@@ -2459,7 +2480,8 @@ app.get("/health", (req, res) => {
 
   res.json({
     status: "ok",
-    contacts_loaded: contacts.size,
+    contacts_loaded: totalContactEntries(),
+    unique_phones: contacts.size,
     active_campaign_id: campaignState.campaign_id,
     active_campaign_file: campaignState.csv_file,
     active_campaign_name_column: campaignState.name_column,
@@ -2512,7 +2534,7 @@ loadContacts()
 
     app.listen(PORT, () => {
       console.log(`\nVTA Webhook running on port ${PORT}`);
-      console.log(`Phone entries indexed: ${contacts.size}`);
+      console.log(`Phone entries indexed: ${totalContactEntries()} (${contacts.size} unique phones)`);
       console.log(`Active campaign ID: ${campaignState.campaign_id}`);
       console.log(`Active campaign file: ${campaignState.csv_file}`);
       console.log(`Active name column: ${campaignState.name_column}`);
