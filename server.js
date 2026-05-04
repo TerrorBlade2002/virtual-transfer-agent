@@ -29,8 +29,13 @@ const DATA_DIR = process.env.DATA_DIR
   : path.resolve(__dirname, "./data");
 const CAMPAIGN_UPLOADS_DIR = path.resolve(DATA_DIR, "./uploads");
 const CAMPAIGN_STATE_FILE = path.resolve(DATA_DIR, "./campaign-state.json");
+const DISPOSITION_LOG_FILE = path.resolve(DATA_DIR, "./dispositions-log.json");
 const CAMPAIGN_RETENTION_DAYS = parseInt(process.env.CAMPAIGN_RETENTION_DAYS || "7", 10);
 const CAMPAIGN_RETENTION_MS = CAMPAIGN_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+const DISPOSITION_RETENTION_DAYS = parseInt(process.env.DISPOSITION_RETENTION_DAYS || "7", 10);
+const DISPOSITION_RETENTION_MS = DISPOSITION_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+const REPORT_TIMEZONE = process.env.REPORT_TIMEZONE || "America/New_York";
+const CAMPAIGN_ADMIN_TOKEN = process.env.CAMPAIGN_ADMIN_TOKEN || process.env.ADMIN_TOKEN || "";
 const AUTO_RESTART_ON_CAMPAIGN_LOAD = process.env.AUTO_RESTART_ON_CAMPAIGN_LOAD === "true";
 const PORT = process.env.PORT || 3000;
 
@@ -188,6 +193,226 @@ function addCampaignHistoryEntry(entry) {
   const history = Array.isArray(campaignState.history) ? campaignState.history : [];
   history.unshift(entry);
   campaignState.history = history.slice(0, 50);
+}
+
+function getTimestampMs(value) {
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function getDateKeyInTimeZone(value, timeZone = REPORT_TIMEZONE) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+
+  const mapped = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${mapped.year}-${mapped.month}-${mapped.day}`;
+}
+
+function parseDateParam(rawValue, fieldName) {
+  if (rawValue === undefined || rawValue === null || rawValue === "") return null;
+  const value = String(rawValue).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new Error(`${fieldName} must be in YYYY-MM-DD format`);
+  }
+  return value;
+}
+
+function saveDispositionLogToDisk() {
+  ensureDirectories();
+  fs.writeFileSync(DISPOSITION_LOG_FILE, JSON.stringify(dispositionLog, null, 2), "utf-8");
+}
+
+function pruneExpiredDispositions({ persist = true } = {}) {
+  ensureDirectories();
+
+  const cutoffMs = Date.now() - DISPOSITION_RETENTION_MS;
+  const before = dispositionLog.length;
+  const kept = dispositionLog.filter((entry) => {
+    const timestampMs = getTimestampMs(entry?.timestamp);
+    if (timestampMs === null) return true;
+    return timestampMs >= cutoffMs;
+  });
+
+  dispositionLog.splice(0, dispositionLog.length, ...kept);
+  const deleted = before - dispositionLog.length;
+
+  if (persist && deleted > 0) {
+    saveDispositionLogToDisk();
+  }
+
+  return { checked: before, deleted };
+}
+
+function loadDispositionLogFromDisk() {
+  ensureDirectories();
+
+  if (!fs.existsSync(DISPOSITION_LOG_FILE)) {
+    dispositionLog.length = 0;
+    return;
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(DISPOSITION_LOG_FILE, "utf-8"));
+    const records = Array.isArray(parsed) ? parsed : [];
+    dispositionLog.splice(0, dispositionLog.length, ...records);
+
+    const cleanupResult = pruneExpiredDispositions({ persist: false });
+    if (cleanupResult.deleted > 0) {
+      saveDispositionLogToDisk();
+    }
+
+    console.log(
+      `[DISPOSITIONS] Loaded ${dispositionLog.length} records from disk `
+      + `(deleted ${cleanupResult.deleted} expired)`
+    );
+  } catch (err) {
+    console.error(`[DISPOSITIONS] Failed reading persisted log: ${err.message}`);
+    dispositionLog.length = 0;
+  }
+}
+
+function appendDispositionEntry(entry) {
+  dispositionLog.push(entry);
+  pruneExpiredDispositions({ persist: false });
+  saveDispositionLogToDisk();
+}
+
+function persistDispositionUpdates() {
+  pruneExpiredDispositions({ persist: false });
+  saveDispositionLogToDisk();
+}
+
+function getDispositionFilters(query = {}) {
+  const status = query.status ? String(query.status).trim() : null;
+  const exactDate = parseDateParam(query.date, "date");
+  const fromDate = parseDateParam(query.from, "from");
+  const toDate = parseDateParam(query.to, "to");
+
+  if (exactDate && (fromDate || toDate)) {
+    throw new Error("Use either date or from/to filters, not both");
+  }
+
+  const startDate = exactDate || fromDate;
+  const endDate = exactDate || toDate;
+  const latestAllowedDate = getDateKeyInTimeZone(new Date(), REPORT_TIMEZONE);
+  const earliestAllowed = new Date(`${latestAllowedDate}T00:00:00Z`);
+  earliestAllowed.setUTCDate(earliestAllowed.getUTCDate() - (DISPOSITION_RETENTION_DAYS - 1));
+  const earliestAllowedDate = earliestAllowed.toISOString().slice(0, 10);
+
+  if (startDate && endDate && startDate > endDate) {
+    throw new Error("from must be earlier than or equal to to");
+  }
+
+  if ((startDate && startDate < earliestAllowedDate) || (endDate && endDate < earliestAllowedDate)) {
+    throw new Error(`Dates older than ${earliestAllowedDate} are outside retention`);
+  }
+
+  if ((startDate && startDate > latestAllowedDate) || (endDate && endDate > latestAllowedDate)) {
+    throw new Error(`Dates later than ${latestAllowedDate} are not allowed`);
+  }
+
+  if (startDate && endDate) {
+    const diffDays = Math.floor((Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`)) / (24 * 60 * 60 * 1000)) + 1;
+    if (diffDays > DISPOSITION_RETENTION_DAYS) {
+      throw new Error(`Date range cannot exceed ${DISPOSITION_RETENTION_DAYS} days`);
+    }
+  }
+
+  return {
+    status,
+    timeZone: REPORT_TIMEZONE,
+    date: exactDate,
+    from: startDate,
+    to: endDate,
+  };
+}
+
+function filterDispositionEntries(entries, filters = {}) {
+  return entries.filter((entry) => {
+    if (!entry?.status) return false;
+
+    if (filters.status && entry.status !== filters.status) {
+      return false;
+    }
+
+    if (filters.from || filters.to) {
+      const dateKey = getDateKeyInTimeZone(entry.timestamp, filters.timeZone || REPORT_TIMEZONE);
+      if (!dateKey) return false;
+      if (filters.from && dateKey < filters.from) return false;
+      if (filters.to && dateKey > filters.to) return false;
+    }
+
+    return true;
+  });
+}
+
+function buildDispositionCsvFileName(filters = {}) {
+  if (filters.from && filters.to && filters.from !== filters.to) {
+    return `vta-dispositions-${filters.from}-to-${filters.to}.csv`;
+  }
+
+  const suffix = filters.from || getDateKeyInTimeZone(new Date(), REPORT_TIMEZONE);
+  return `vta-dispositions-${suffix}.csv`;
+}
+
+function getRecentDispositionAvailability() {
+  const todayKey = getDateKeyInTimeZone(new Date(), REPORT_TIMEZONE);
+  const counts = new Map();
+
+  for (const entry of dispositionLog) {
+    if (!entry?.status) continue;
+    const dateKey = getDateKeyInTimeZone(entry.timestamp, REPORT_TIMEZONE);
+    if (!dateKey) continue;
+    counts.set(dateKey, (counts.get(dateKey) || 0) + 1);
+  }
+
+  return Array.from({ length: DISPOSITION_RETENTION_DAYS }, (_, offset) => {
+    const date = new Date(`${todayKey}T00:00:00Z`);
+    date.setUTCDate(date.getUTCDate() - offset);
+    const dateKey = date.toISOString().slice(0, 10);
+    return {
+      date: dateKey,
+      count: counts.get(dateKey) || 0,
+      available: (counts.get(dateKey) || 0) > 0,
+      isToday: offset === 0,
+    };
+  });
+}
+
+function readCampaignAdminToken(req) {
+  const authHeader = String(req.headers.authorization || "").trim();
+  if (authHeader.toLowerCase().startsWith("bearer ")) {
+    return authHeader.slice(7).trim();
+  }
+
+  return String(
+    req.headers["x-campaign-admin-token"]
+      || req.query.token
+      || req.query.admin_token
+      || ""
+  ).trim();
+}
+
+function isCampaignAdminAuthorized(req) {
+  if (!CAMPAIGN_ADMIN_TOKEN) return true;
+  return readCampaignAdminToken(req) === CAMPAIGN_ADMIN_TOKEN;
+}
+
+function requireCampaignAdminToken(req, res) {
+  if (isCampaignAdminAuthorized(req)) return true;
+
+  res.status(401).json({
+    error: "Unauthorized",
+    message: "Valid campaign admin token required",
+  });
+  return false;
 }
 
 function pruneOldUploadedCampaigns() {
@@ -1003,9 +1228,262 @@ function getCampaignPortalHtml() {
 </html>`;
 }
 
+function getDispositionPortalHtml() {
+  const tokenRequired = Boolean(CAMPAIGN_ADMIN_TOKEN);
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Disposition Downloads</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --surface: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --border: #e2e8f0;
+      --accent: #1d4ed8;
+      --accent-soft: #dbeafe;
+      --success: #16a34a;
+      --danger: #dc2626;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); }
+    .wrap { max-width: 1100px; margin: 32px auto; padding: 0 20px; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 20px; box-shadow: 0 8px 30px rgba(15, 23, 42, 0.05); margin-bottom: 16px; }
+    h1, h2 { margin: 0 0 8px; }
+    h1 { font-size: 1.4rem; }
+    h2 { font-size: 1.05rem; }
+    .muted { color: var(--muted); font-size: 0.95rem; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+    .pill { display: inline-block; border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; font-size: 0.82rem; color: var(--muted); margin-right: 8px; margin-top: 8px; }
+    input, select, button { border-radius: 10px; font-size: 0.95rem; }
+    input, select { border: 1px solid var(--border); padding: 10px 12px; background: #fff; color: var(--text); min-width: 180px; }
+    button { border: 1px solid var(--accent); background: var(--accent); color: #fff; padding: 10px 16px; cursor: pointer; font-weight: 600; }
+    button.secondary { background: var(--accent-soft); color: #1e3a8a; border-color: #bfdbfe; }
+    button.ghost { background: #fff; color: var(--accent); }
+    button:disabled, .day-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    .status { margin-top: 12px; font-size: 0.92rem; padding: 10px 12px; border-radius: 10px; display: none; white-space: pre-wrap; }
+    .status.ok { color: #166534; background: #ecfdf3; border: 1px solid #bbf7d0; }
+    .status.error { color: #7f1d1d; background: #fef2f2; border: 1px solid #fecaca; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 12px; margin-top: 14px; }
+    .day-btn { text-align: left; border: 1px solid var(--border); background: #fff; color: var(--text); padding: 12px; border-radius: 12px; }
+    .day-btn .date { font-weight: 700; display: block; }
+    .day-btn .meta { font-size: 0.84rem; color: var(--muted); display: block; margin-top: 6px; }
+    .day-btn.available { border-color: #bfdbfe; background: #eff6ff; }
+    .day-btn.available:hover { border-color: var(--accent); }
+    .small { font-size: 0.85rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Disposition Download Portal</h1>
+      <div class="muted">Download disposition CSVs by single date or date range. Only the last ${DISPOSITION_RETENTION_DAYS} days are eligible, using ${escapeHtml(REPORT_TIMEZONE)}.</div>
+      <div class="row">
+        <span class="pill">Retention: ${DISPOSITION_RETENTION_DAYS} days</span>
+        <span class="pill">Timezone: ${escapeHtml(REPORT_TIMEZONE)}</span>
+        <span class="pill">Token protected: ${tokenRequired ? "Yes" : "No"}</span>
+      </div>
+      ${tokenRequired ? `
+      <div class="row">
+        <input id="tokenInput" type="password" placeholder="Campaign admin token" autocomplete="off" />
+        <button id="unlockBtn" class="ghost">Load dates</button>
+      </div>
+      <div class="small">If the token is configured on Railway, enter it here to load availability and download files.</div>
+      ` : ""}
+      <div id="status" class="status"></div>
+    </div>
+
+    <div class="card">
+      <h2>Single-date download</h2>
+      <div class="muted">Enabled dates have disposition data. Disabled dates are within retention but currently have no saved records.</div>
+      <div id="dateGrid" class="grid"></div>
+    </div>
+
+    <div class="card">
+      <h2>Date-range download</h2>
+      <div class="row">
+        <select id="fromDate"></select>
+        <select id="toDate"></select>
+        <button id="rangeDownloadBtn" class="secondary">Download range CSV</button>
+      </div>
+      <div class="small">Range download uses only dates that still exist inside the ${DISPOSITION_RETENTION_DAYS}-day window.</div>
+    </div>
+  </div>
+
+  <script>
+    const tokenRequired = ${JSON.stringify(tokenRequired)};
+    const statusEl = document.getElementById("status");
+    const dateGrid = document.getElementById("dateGrid");
+    const fromDate = document.getElementById("fromDate");
+    const toDate = document.getElementById("toDate");
+    const rangeDownloadBtn = document.getElementById("rangeDownloadBtn");
+    const tokenInput = document.getElementById("tokenInput");
+    const unlockBtn = document.getElementById("unlockBtn");
+
+    let availability = [];
+
+    function showStatus(text, kind = "ok") {
+      statusEl.style.display = "block";
+      statusEl.className = "status " + kind;
+      statusEl.textContent = text;
+    }
+
+    function getHeaders() {
+      const headers = {};
+      const token = tokenInput ? tokenInput.value.trim() : "";
+      if (token) headers["x-campaign-admin-token"] = token;
+      return headers;
+    }
+
+    function renderGrid() {
+      dateGrid.innerHTML = "";
+      availability.forEach((item) => {
+        const btn = document.createElement("button");
+        btn.className = "day-btn" + (item.available ? " available" : "");
+        btn.disabled = !item.available;
+        btn.innerHTML = '<span class="date">' + item.date + '</span>'
+          + '<span class="meta">' + item.count + ' record' + (item.count === 1 ? '' : 's') + (item.isToday ? ' · today' : '') + '</span>';
+        btn.addEventListener("click", () => downloadCsv({ date: item.date }));
+        dateGrid.appendChild(btn);
+      });
+    }
+
+    function renderSelects() {
+      const availableDates = availability.filter((item) => item.available).map((item) => item.date);
+      fromDate.innerHTML = "";
+      toDate.innerHTML = "";
+
+      if (!availableDates.length) {
+        const opt1 = document.createElement("option");
+        opt1.textContent = "No dates available";
+        opt1.value = "";
+        fromDate.appendChild(opt1);
+        const opt2 = opt1.cloneNode(true);
+        toDate.appendChild(opt2);
+        fromDate.disabled = true;
+        toDate.disabled = true;
+        rangeDownloadBtn.disabled = true;
+        return;
+      }
+
+      availableDates.forEach((date) => {
+        const fromOpt = document.createElement("option");
+        fromOpt.value = date;
+        fromOpt.textContent = date;
+        fromDate.appendChild(fromOpt);
+
+        const toOpt = document.createElement("option");
+        toOpt.value = date;
+        toOpt.textContent = date;
+        toDate.appendChild(toOpt);
+      });
+
+      fromDate.disabled = false;
+      toDate.disabled = false;
+      rangeDownloadBtn.disabled = false;
+      fromDate.value = availableDates[availableDates.length - 1];
+      toDate.value = availableDates[0];
+    }
+
+    async function loadAvailability() {
+      try {
+        const res = await fetch("/dispositions/availability", { headers: getHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || data.error || "Failed to load availability");
+        availability = data.dates || [];
+        renderGrid();
+        renderSelects();
+        showStatus("Availability refreshed.", "ok");
+      } catch (err) {
+        availability = [];
+        renderGrid();
+        renderSelects();
+        showStatus(err.message || "Failed to load availability.", "error");
+      }
+    }
+
+    async function downloadCsv(params) {
+      try {
+        const url = new URL("/dispositions/csv", window.location.origin);
+        Object.entries(params || {}).forEach(([key, value]) => {
+          if (value) url.searchParams.set(key, value);
+        });
+
+        const res = await fetch(url.toString(), { headers: getHeaders() });
+        if (!res.ok) {
+          const contentType = res.headers.get("content-type") || "";
+          if (contentType.includes("application/json")) {
+            const data = await res.json();
+            throw new Error(data.message || data.error || "Download failed");
+          }
+          throw new Error("Download failed");
+        }
+
+        const blob = await res.blob();
+        const disposition = res.headers.get("content-disposition") || "";
+        const match = disposition.match(/filename=([^;]+)/i);
+        const fileName = match ? match[1].replace(/"/g, "") : "dispositions.csv";
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(link.href);
+        showStatus("CSV download started: " + fileName, "ok");
+      } catch (err) {
+        showStatus(err.message || "Download failed.", "error");
+      }
+    }
+
+    rangeDownloadBtn.addEventListener("click", () => {
+      if (!fromDate.value || !toDate.value) {
+        showStatus("Select a valid start and end date.", "error");
+        return;
+      }
+      if (fromDate.value > toDate.value) {
+        showStatus("Start date must be earlier than or equal to end date.", "error");
+        return;
+      }
+      downloadCsv({ from: fromDate.value, to: toDate.value });
+    });
+
+    if (unlockBtn) {
+      unlockBtn.addEventListener("click", loadAvailability);
+    }
+
+    if (!tokenRequired) {
+      loadAvailability();
+    }
+  </script>
+</body>
+</html>`;
+}
+
 app.get("/campaign-portal", (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(getCampaignPortalHtml());
+});
+
+app.get("/dispositions-portal", (req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(getDispositionPortalHtml());
+});
+
+app.get("/dispositions/availability", (req, res) => {
+  if (!requireCampaignAdminToken(req, res)) return;
+
+  pruneExpiredDispositions();
+  res.json({
+    retentionDays: DISPOSITION_RETENTION_DAYS,
+    timeZone: REPORT_TIMEZONE,
+    tokenRequired: Boolean(CAMPAIGN_ADMIN_TOKEN),
+    dates: getRecentDispositionAvailability(),
+  });
 });
 
 app.get("/campaign-state", (req, res) => {
@@ -1256,7 +1734,7 @@ app.post("/log-verification", (req, res) => {
   stats.verificationsLogged++;
   incrementStatForStatus(status);
 
-  dispositionLog.push({
+  appendDispositionEntry({
     phone: phoneKey,
     status,
     disposition: getDispositionLabel(status),
@@ -1280,6 +1758,7 @@ app.post("/log-verification", (req, res) => {
     fallbackEntry.full_name = full_name || fallbackEntry.full_name;
     fallbackEntry.source = "log_verification_late";
     stats.customerDisconnectedCount--;
+    persistDispositionUpdates();
     console.log(`[VERIFICATION] Overwrote Customer Disconnected fallback for ${phoneKey} → ${getDispositionLabel(status)}`);
   }
 
@@ -1393,13 +1872,14 @@ app.post("/retell-call-ended", (req, res) => {
         existing.call_id = callId;
         existing.duration_ms = durationMs;
         existing.disconnect_reason = disconnectReason;
+        persistDispositionUpdates();
       }
       console.log(`[CALL ENDED] ${phone}: Verification exists — enriched with metadata`);
     } else {
       // FALLBACK: Customer hung up before log_verification.
       const contactInfo = phone.length === 10 ? contacts.get(phone) : null;
 
-      dispositionLog.push({
+      appendDispositionEntry({
         phone: phone || "unknown",
         call_id: callId,
         status: "customer_disconnected",
@@ -1515,8 +1995,10 @@ app.post("/retell-call-ended", (req, res) => {
       } else {
         console.log(`[CALL ANALYZED] ${phone}: Enriched with transcript`);
       }
+
+      persistDispositionUpdates();
     } else {
-      dispositionLog.push({
+      appendDispositionEntry({
         phone,
         call_id: callId,
         analysis: call.call_analysis,
@@ -1535,76 +2017,43 @@ app.post("/retell-call-ended", (req, res) => {
 // ROUTE 5: DISPOSITIONS
 // ============================================================
 app.get("/dispositions", (req, res) => {
-  const limit = parseInt(req.query.limit) || 100;
-  const statusFilter = req.query.status || null;
+  if (!requireCampaignAdminToken(req, res)) return;
 
-  let results = dispositionLog.filter((d) => d.status).slice().reverse();
-  if (statusFilter) results = results.filter((d) => d.status === statusFilter);
+  pruneExpiredDispositions();
+
+  const parsedLimit = parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 100;
+
+  let filters;
+  try {
+    filters = getDispositionFilters(req.query);
+  } catch (err) {
+    return res.status(400).json({ error: err.message, timezone: REPORT_TIMEZONE });
+  }
+
+  const results = filterDispositionEntries(dispositionLog, filters).slice().reverse();
 
   res.json({
     total: results.length,
     showing: Math.min(results.length, limit),
+    filters,
     dispositions: results.slice(0, limit),
   });
 });
 
 app.get("/dispositions/csv", (req, res) => {
-  const rawDate = req.query?.date;
-  const hasDateParam = typeof rawDate === "string" && rawDate.length > 0;
+  if (!requireCampaignAdminToken(req, res)) return;
 
-  // DATE-FILTERED VARIANT — requires auth (user or admin); single date only.
-  // Query param `date` must be YYYY-MM-DD; filters by Eastern-time day.
-  if (hasDateParam) {
-    const who = authenticate(req);
-    if (!who) {
-      return res.status(401).json({ error: "Date-filtered dispositions require Authorization: Bearer <token>" });
-    }
+  pruneExpiredDispositions();
 
-    const dateStr = String(rawDate).trim();
-    if (!isValidDateString(dateStr)) {
-      return res.status(400).json({ error: `Invalid date: '${dateStr}'. Expected YYYY-MM-DD.` });
-    }
-
-    // Reject multiple values (express may pass array if ?date=a&date=b)
-    if (Array.isArray(req.query.date)) {
-      return res.status(400).json({ error: "Only a single date is allowed per download" });
-    }
-
-    const withStatus = dispositionLog.filter((d) => {
-      if (!d.status || !d.timestamp) return false;
-      try {
-        return getEasternDateString(new Date(d.timestamp)) === dateStr;
-      } catch {
-        return false;
-      }
-    });
-
-    const header = "timestamp,phone,disposition,status,summary,full_name,call_id,duration_ms,disconnect_reason,source\n";
-    const rows = withStatus.map((d) =>
-      [
-        d.timestamp || "",
-        d.phone || "",
-        getDispositionLabel(d.status),
-        d.status || "",
-        (d.summary || "").replace(/,/g, ";").replace(/\n/g, " "),
-        (d.full_name || "").replace(/,/g, ";"),
-        d.call_id || "",
-        d.duration_ms || "",
-        d.disconnect_reason || "",
-        d.source || "",
-      ].join(",")
-    ).join("\n");
-
-    console.log(`[DISPOSITIONS CSV] ${who.role}:${who.label} downloaded ${dateStr} (${withStatus.length} rows)`);
-
-    res.setHeader("Content-Type", "text/csv");
-    res.setHeader("Content-Disposition", `attachment; filename=vta-dispositions-${dateStr}.csv`);
-    return res.send(header + rows);
+  let filters;
+  try {
+    filters = getDispositionFilters(req.query);
+  } catch (err) {
+    return res.status(400).json({ error: err.message, timezone: REPORT_TIMEZONE });
   }
 
-  // LEGACY VARIANT — no date param, no auth. Returns ALL dispositions.
-  // Preserved for backward compatibility with existing consumers.
-  const withStatus = dispositionLog.filter((d) => d.status);
+  const withStatus = filterDispositionEntries(dispositionLog, filters);
 
   const header = "timestamp,phone,disposition,status,summary,full_name,call_id,duration_ms,disconnect_reason,source\n";
   const rows = withStatus.map((d) =>
@@ -1623,7 +2072,7 @@ app.get("/dispositions/csv", (req, res) => {
   ).join("\n");
 
   res.setHeader("Content-Type", "text/csv");
-  res.setHeader("Content-Disposition", `attachment; filename=vta-dispositions-${new Date().toISOString().slice(0, 10)}.csv`);
+  res.setHeader("Content-Disposition", `attachment; filename=${buildDispositionCsvFileName(filters)}`);
   res.send(header + rows);
 });
 
@@ -1633,7 +2082,6 @@ app.get("/dispositions/csv", (req, res) => {
 // POST /campaign/upload
 //   Headers: Authorization: Bearer <token>  (user or admin)
 //   Form fields (multipart/form-data):
-//     file        (required) — the CSV file
 //     date        (required) — YYYY-MM-DD; broadcast date the CSV is for
 //     nameColumn  (optional) — overrides auto-detection
 //
@@ -2007,6 +2455,8 @@ app.get("/auth/whoami", requireAuth, (req, res) => {
 // HEALTH CHECK
 // ============================================================
 app.get("/health", (req, res) => {
+  pruneExpiredDispositions();
+
   res.json({
     status: "ok",
     contacts_loaded: contacts.size,
@@ -2014,6 +2464,8 @@ app.get("/health", (req, res) => {
     active_campaign_file: campaignState.csv_file,
     active_campaign_name_column: campaignState.name_column,
     campaign_retention_days: CAMPAIGN_RETENTION_DAYS,
+    disposition_retention_days: DISPOSITION_RETENTION_DAYS,
+    reporting_timezone: REPORT_TIMEZONE,
     activeVerifications: verificationResults.size,
     totalDispositions: dispositionLog.filter((d) => d.status).length,
     ...stats,
@@ -2024,6 +2476,8 @@ app.get("/health", (req, res) => {
 // ============================================================
 // STARTUP
 // ============================================================
+loadDispositionLogFromDisk();
+
 loadContacts()
   .then(async () => {
     if (!CSV_FILE_OVERRIDE) {
@@ -2047,6 +2501,15 @@ loadContacts()
       }, 10 * 60 * 1000);
     }
 
+    const dispositionCleanupResult = pruneExpiredDispositions();
+    console.log(`[DISPOSITIONS] Startup cleanup complete. Checked: ${dispositionCleanupResult.checked}, Deleted: ${dispositionCleanupResult.deleted}`);
+    setInterval(() => {
+      const result = pruneExpiredDispositions();
+      if (result.deleted > 0) {
+        console.log(`[DISPOSITIONS] Interval cleanup complete. Checked: ${result.checked}, Deleted: ${result.deleted}`);
+      }
+    }, 60 * 60 * 1000);
+
     app.listen(PORT, () => {
       console.log(`\nVTA Webhook running on port ${PORT}`);
       console.log(`Phone entries indexed: ${contacts.size}`);
@@ -2054,6 +2517,7 @@ loadContacts()
       console.log(`Active campaign file: ${campaignState.csv_file}`);
       console.log(`Active name column: ${campaignState.name_column}`);
       console.log(`Campaign retention: ${CAMPAIGN_RETENTION_DAYS} days`);
+      console.log(`Disposition retention: ${DISPOSITION_RETENTION_DAYS} days (${REPORT_TIMEZONE})`);
       console.log(`Auto restart on campaign load: ${AUTO_RESTART_ON_CAMPAIGN_LOAD}`);
       console.log(`\nValid dispositions:`);
       for (const [code, label] of Object.entries(DISPOSITION_LABELS)) {
@@ -2068,8 +2532,10 @@ loadContacts()
       console.log(`  POST /log-verification      → Retell custom fn (verification result)`);
       console.log(`  GET  /verification-status    → TCN reads verification result`);
       console.log(`  POST /retell-call-ended      → Retell call ended/analyzed webhook`);
+      console.log(`  GET  /dispositions-portal    → Filtered disposition download UI`);
       console.log(`  GET  /dispositions           → View dispositions (JSON)`);
-      console.log(`  GET  /dispositions/csv       → Download dispositions (CSV; add ?date=YYYY-MM-DD + auth for per-day)`);
+      console.log(`  GET  /dispositions/availability → Recent disposition dates/counts`);
+      console.log(`  GET  /dispositions/csv       → Download dispositions (CSV; supports ?date=YYYY-MM-DD or ?from=YYYY-MM-DD&to=YYYY-MM-DD)`);
       console.log(`  GET  /linkback-start          → TCN pre-linkback timer ping`);
       console.log(`  GET  /health                 → Health check`);
       console.log(`  POST /campaign/upload        → [auth] Upload date-keyed CSV (multipart, date required)`);

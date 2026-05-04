@@ -89,6 +89,10 @@ Additional endpoints:
 - `GET /campaign-state`
 - `POST /campaign/preview`
 - `POST /campaign/load`
+- `GET /dispositions-portal`
+- `GET /dispositions/availability`
+- `GET /dispositions`
+- `GET /dispositions/csv`
 
 `GET /campaign-state` includes:
 
@@ -110,4 +114,7 @@ Additional endpoints:
 - `CSV_FILE` — Force a specific CSV path (overrides portal-selected campaign)
 - `DATA_DIR` — Directory for campaign state/uploads (use Railway volume mount path)
 - `CAMPAIGN_RETENTION_DAYS` — Upload retention (default: 7)
+- `DISPOSITION_RETENTION_DAYS` — Disposition retention window (default: 7)
+- `REPORT_TIMEZONE` — Date filter timezone for disposition downloads (default: `America/New_York`)
+- `CAMPAIGN_ADMIN_TOKEN` — Optional token required for disposition JSON/CSV download endpoints
 - `AUTO_RESTART_ON_CAMPAIGN_LOAD` — `true` to auto-restart process after campaign load

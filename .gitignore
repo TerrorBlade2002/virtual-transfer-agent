@@ -19,6 +19,7 @@ pids/
 *.pid
 *.pid.lock
 data/campaign-state.json
+data/dispositions-log.json
 data/uploads/
 data/user-tokens.json
 
