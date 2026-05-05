@@ -1471,6 +1471,242 @@ function getDispositionPortalHtml() {
 </html>`;
 }
 
+function getMonitoringHtml() {
+  const tokenRequired = Boolean(CAMPAIGN_ADMIN_TOKEN);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>VTA Monitoring</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;background:#0a0a0a;color:#e5e5e5;padding:24px}
+    .wrap{max-width:1200px;margin:0 auto}
+    h1{font-size:1.3rem;font-weight:600;margin-bottom:4px}
+    .subtitle{color:#737373;font-size:0.85rem;margin-bottom:20px}
+    .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:20px}
+    select,input,button{font-family:inherit;font-size:0.85rem;padding:6px 10px;border:1px solid #333;border-radius:6px;background:#171717;color:#e5e5e5;outline:none}
+    select:focus,input:focus{border-color:#525252}
+    button{cursor:pointer;background:#262626;border-color:#404040}
+    button:hover{background:#333}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:24px}
+    .stat{background:#171717;border:1px solid #262626;border-radius:10px;padding:14px;text-align:center}
+    .stat .val{font-size:1.5rem;font-weight:700;color:#fafafa}
+    .stat .lbl{font-size:0.75rem;color:#737373;margin-top:2px}
+    .chart-container{background:#171717;border:1px solid #262626;border-radius:10px;padding:16px;margin-bottom:16px}
+    .chart-title{font-size:0.85rem;font-weight:600;margin-bottom:10px;color:#a3a3a3}
+    canvas{width:100%!important;height:200px!important}
+    .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px}
+    .legend-item{display:flex;align-items:center;gap:4px;font-size:0.75rem;color:#a3a3a3}
+    .legend-dot{width:10px;height:10px;border-radius:2px}
+    .status-msg{color:#737373;font-size:0.85rem;margin-top:8px}
+    ${tokenRequired ? '.auth-row{margin-bottom:16px;display:flex;gap:8px;align-items:center}' : ''}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>VTA Monitoring</h1>
+    <p class="subtitle">Call volume &amp; disposition breakdown — hourly</p>
+    ${tokenRequired ? '<div class="auth-row"><input id="token" type="password" placeholder="Admin token"/><button onclick="loadData()">Unlock</button></div>' : ''}
+    <div class="controls">
+      <select id="dateSelect"><option value="">Loading...</option></select>
+      <button onclick="loadData()">Refresh</button>
+      <span class="status-msg" id="statusMsg"></span>
+    </div>
+    <div class="grid" id="statsGrid"></div>
+    <div class="chart-container">
+      <div class="chart-title">Calls per Hour</div>
+      <canvas id="hourlyChart"></canvas>
+      <div class="legend" id="hourlyLegend"></div>
+    </div>
+    <div class="chart-container">
+      <div class="chart-title">Disposition Breakdown</div>
+      <canvas id="dispositionChart"></canvas>
+      <div class="legend" id="dispositionLegend"></div>
+    </div>
+  </div>
+  <script>
+    const COLORS = {
+      verified:'#22c55e',wrong_number:'#ef4444',third_party_end:'#f97316',
+      consumer_busy_end:'#eab308',dnc:'#dc2626',customer_wants_human:'#3b82f6',
+      customer_disconnected:'#6b7280',other:'#a855f7'
+    };
+    const tokenRequired = ${tokenRequired};
+    let allData = [];
+
+    function getHeaders() {
+      const h = {'Content-Type':'application/json'};
+      const t = tokenRequired && document.getElementById('token') ? document.getElementById('token').value : '';
+      if (t) h['X-Campaign-Token'] = t;
+      return h;
+    }
+
+    async function loadData() {
+      const msg = document.getElementById('statusMsg');
+      msg.textContent = 'Loading...';
+      try {
+        const dateVal = document.getElementById('dateSelect').value;
+        const params = new URLSearchParams({limit:'5000'});
+        if (dateVal) params.set('date', dateVal);
+        const res = await fetch('/dispositions?' + params.toString(), {headers:getHeaders()});
+        if (!res.ok) throw new Error((await res.json()).error || res.statusText);
+        const json = await res.json();
+        allData = json.dispositions || [];
+        render();
+        msg.textContent = allData.length + ' entries loaded';
+      } catch(e) {
+        msg.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    function render() {
+      renderStats();
+      renderHourlyChart();
+      renderDispositionChart();
+    }
+
+    function renderStats() {
+      const grid = document.getElementById('statsGrid');
+      const total = allData.length;
+      const counts = {};
+      allData.forEach(d => { counts[d.status] = (counts[d.status]||0) + 1; });
+      const upgraded = allData.filter(d => d.initial_status).length;
+      let html = '<div class="stat"><div class="val">' + total + '</div><div class="lbl">Total Calls</div></div>';
+      html += '<div class="stat"><div class="val">' + (counts.verified||0) + '</div><div class="lbl">Verified</div></div>';
+      html += '<div class="stat"><div class="val">' + (counts.customer_wants_human||0) + '</div><div class="lbl">Wants Human</div></div>';
+      html += '<div class="stat"><div class="val">' + (counts.customer_disconnected||0) + '</div><div class="lbl">Disconnected</div></div>';
+      html += '<div class="stat"><div class="val">' + (counts.wrong_number||0) + '</div><div class="lbl">Wrong Number</div></div>';
+      html += '<div class="stat"><div class="val">' + upgraded + '</div><div class="lbl">Upgraded</div></div>';
+      grid.innerHTML = html;
+    }
+
+    function renderHourlyChart() {
+      const canvas = document.getElementById('hourlyChart');
+      const ctx = canvas.getContext('2d');
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.scale(dpr, dpr);
+      const W = rect.width, H = rect.height;
+      ctx.clearRect(0,0,W,H);
+
+      const hourly = new Array(24).fill(0);
+      const hourlyVerified = new Array(24).fill(0);
+      allData.forEach(d => {
+        if (!d.timestamp) return;
+        const h = new Date(d.timestamp).getHours();
+        hourly[h]++;
+        if (d.status === 'verified') hourlyVerified[h]++;
+      });
+
+      const max = Math.max(...hourly, 1);
+      const padL = 36, padR = 10, padT = 10, padB = 24;
+      const chartW = W - padL - padR;
+      const chartH = H - padT - padB;
+      const barW = chartW / 24;
+
+      ctx.strokeStyle = '#333';
+      ctx.lineWidth = 0.5;
+      for (let i = 0; i <= 4; i++) {
+        const y = padT + chartH - (chartH * i / 4);
+        ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
+        ctx.fillStyle = '#525252'; ctx.font = '10px monospace'; ctx.textAlign = 'right';
+        ctx.fillText(Math.round(max * i / 4), padL - 4, y + 3);
+      }
+
+      hourly.forEach((v, i) => {
+        const x = padL + i * barW + 2;
+        const bw = barW - 4;
+        const bh = (v / max) * chartH;
+        ctx.fillStyle = '#404040';
+        ctx.fillRect(x, padT + chartH - bh, bw, bh);
+        const vh = (hourlyVerified[i] / max) * chartH;
+        ctx.fillStyle = '#22c55e';
+        ctx.fillRect(x, padT + chartH - vh, bw, vh);
+        if (i % 3 === 0) {
+          ctx.fillStyle = '#525252'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+          ctx.fillText(i + ':00', x + bw/2, H - 4);
+        }
+      });
+
+      const legend = document.getElementById('hourlyLegend');
+      legend.innerHTML = '<div class="legend-item"><div class="legend-dot" style="background:#404040"></div>Total</div><div class="legend-item"><div class="legend-dot" style="background:#22c55e"></div>Verified</div>';
+    }
+
+    function renderDispositionChart() {
+      const canvas = document.getElementById('dispositionChart');
+      const ctx = canvas.getContext('2d');
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.scale(dpr, dpr);
+      const W = rect.width, H = rect.height;
+      ctx.clearRect(0,0,W,H);
+
+      const counts = {};
+      allData.forEach(d => { counts[d.status] = (counts[d.status]||0) + 1; });
+      const statuses = Object.keys(counts).sort((a,b) => counts[b] - counts[a]);
+      if (!statuses.length) return;
+
+      const max = Math.max(...Object.values(counts), 1);
+      const padL = 36, padR = 10, padT = 10, padB = 40;
+      const chartW = W - padL - padR;
+      const chartH = H - padT - padB;
+      const barW = chartW / statuses.length;
+
+      ctx.strokeStyle = '#333'; ctx.lineWidth = 0.5;
+      for (let i = 0; i <= 4; i++) {
+        const y = padT + chartH - (chartH * i / 4);
+        ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
+        ctx.fillStyle = '#525252'; ctx.font = '10px monospace'; ctx.textAlign = 'right';
+        ctx.fillText(Math.round(max * i / 4), padL - 4, y + 3);
+      }
+
+      statuses.forEach((s, i) => {
+        const x = padL + i * barW + 4;
+        const bw = barW - 8;
+        const bh = (counts[s] / max) * chartH;
+        ctx.fillStyle = COLORS[s] || '#525252';
+        ctx.fillRect(x, padT + chartH - bh, bw, bh);
+        ctx.save();
+        ctx.translate(x + bw/2, padT + chartH + 6);
+        ctx.rotate(-0.5);
+        ctx.fillStyle = '#737373'; ctx.font = '9px monospace'; ctx.textAlign = 'left';
+        ctx.fillText(s.replace(/_/g,' ').slice(0,14), 0, 0);
+        ctx.restore();
+      });
+
+      const legend = document.getElementById('dispositionLegend');
+      legend.innerHTML = statuses.map(s => '<div class="legend-item"><div class="legend-dot" style="background:' + (COLORS[s]||'#525252') + '"></div>' + s.replace(/_/g,' ') + ' (' + counts[s] + ')</div>').join('');
+    }
+
+    async function loadDates() {
+      try {
+        const res = await fetch('/dispositions/availability', {headers:getHeaders()});
+        if (!res.ok) return;
+        const json = await res.json();
+        const sel = document.getElementById('dateSelect');
+        sel.innerHTML = '';
+        const dates = json.dates || [];
+        if (!dates.length) { sel.innerHTML = '<option value="">No data</option>'; return; }
+        dates.forEach(d => {
+          const opt = document.createElement('option');
+          opt.value = d.date; opt.textContent = d.date + ' (' + d.count + ')';
+          sel.appendChild(opt);
+        });
+        loadData();
+      } catch(e) { document.getElementById('statusMsg').textContent = e.message; }
+    }
+
+    ${tokenRequired ? 'document.querySelector(".auth-row button").addEventListener("click", loadDates);' : 'loadDates();'}
+  </script>
+</body>
+</html>`;
+}
+
 app.get("/campaign-portal", (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(getCampaignPortalHtml());
@@ -1479,6 +1715,11 @@ app.get("/campaign-portal", (req, res) => {
 app.get("/dispositions-portal", (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(getDispositionPortalHtml());
+});
+
+app.get("/monitoring", (req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(getMonitoringHtml());
 });
 
 app.get("/dispositions/availability", (req, res) => {
@@ -2513,6 +2754,7 @@ loadContacts()
       console.log(`  GET  /verification-status    → TCN reads verification result`);
       console.log(`  POST /retell-call-ended      → Retell call ended/analyzed webhook`);
       console.log(`  GET  /dispositions-portal    → Filtered disposition download UI`);
+      console.log(`  GET  /monitoring             → Live call volume & disposition charts`);
       console.log(`  GET  /dispositions           → View dispositions (JSON)`);
       console.log(`  GET  /dispositions/availability → Recent disposition dates/counts`);
       console.log(`  GET  /dispositions/csv       → Download dispositions (CSV; supports ?date=YYYY-MM-DD or ?from=YYYY-MM-DD&to=YYYY-MM-DD)`);
