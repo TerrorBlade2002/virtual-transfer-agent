@@ -11,6 +11,7 @@ const multer = require("multer");
 
 const app = express();
 app.use(express.json({ limit: "25mb" }));
+app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
 // Multer instance for multipart CSV uploads. In-memory (25 MB cap) so we can
 // write the file atomically to its date-keyed destination ourselves.
@@ -2091,6 +2092,7 @@ app.get("/verification-status", (req, res) => {
 //   outcome=no_agent        → Hunt Group Action Error (dropped/no agent)
 // ============================================================
 app.post("/call-completed", (req, res) => {
+  console.log(`[CALL COMPLETED] Raw request — query: ${JSON.stringify(req.query)}, body: ${JSON.stringify(req.body)}, content-type: ${req.headers["content-type"]}`);
   const params = req.body || {};
   const phone = normalizePhone(params.phone || req.query.phone || "");
   const outcome = params.outcome || req.query.outcome || "";
