@@ -1627,7 +1627,6 @@ app.get("/linkback-start", (req, res) => {
   if (phone.length === 10) {
     linkbackTimestamps.set(phone, Date.now());
     setTimeout(() => linkbackTimestamps.delete(phone), LINKBACK_TIMING_TTL);
-    console.log(`[LINKBACK START] ${phone}: TCN about to dial Retell`);
   }
   res.json({ ok: true });
 });
@@ -1647,23 +1646,14 @@ app.post("/retell-webhook", (req, res) => {
   const fromNumber = req.body?.call_inbound?.from_number || "";
   const normalizedFrom = normalizePhone(fromNumber);
 
-  console.log(`[WEBHOOK] ${fromNumber} → ${normalizedFrom}`);
-
   const queue = contacts.get(normalizedFrom);
   const contact = Array.isArray(queue) && queue.length > 0 ? queue[0] : null;
 
   if (contact) {
     stats.webhookHits++;
+    linkbackTimestamps.delete(normalizedFrom);
 
-    // Calculate SIP handshake time if linkback-start was recorded
-    const linkbackStart = linkbackTimestamps.get(normalizedFrom);
-    if (linkbackStart) {
-      const sipHandshakeMs = Date.now() - linkbackStart;
-      console.log(`[SIP TIMING] ${normalizedFrom}: ${sipHandshakeMs}ms (TCN Linkback → Retell webhook)`);
-      linkbackTimestamps.delete(normalizedFrom);
-    }
-
-    console.log(`  ✓ ${contact.full_name} (${queue.length} remaining for this phone)`);
+    console.log(`[WEBHOOK] ${normalizedFrom} → "${contact.full_name}" (${queue.length} queued)`);
 
     return res.json({
       call_inbound: {
@@ -1681,16 +1671,9 @@ app.post("/retell-webhook", (req, res) => {
   }
 
   stats.webhookMisses++;
+  linkbackTimestamps.delete(normalizedFrom);
 
-  // Still capture SIP timing even if contact not found
-  const linkbackStartMiss = linkbackTimestamps.get(normalizedFrom);
-  if (linkbackStartMiss) {
-    const sipHandshakeMs = Date.now() - linkbackStartMiss;
-    console.log(`[SIP TIMING] ${normalizedFrom}: ${sipHandshakeMs}ms (TCN Linkback → Retell webhook) [MISS]`);
-    linkbackTimestamps.delete(normalizedFrom);
-  }
-
-  console.log(`  ✗ NOT FOUND`);
+  console.log(`[WEBHOOK] ${normalizedFrom} → NOT FOUND`);
 
   return res.json({
     call_inbound: {
@@ -1713,8 +1696,6 @@ app.post("/retell-webhook", (req, res) => {
 //   consumer_busy_end, dnc, customer_wants_human, other
 // ============================================================
 app.post("/log-verification", (req, res) => {
-  console.log(`[VERIFICATION] Full payload:`, JSON.stringify(req.body, null, 2));
-
   const args = req.body?.args || req.body || {};
   const { status, summary, full_name } = args;
 
@@ -1743,35 +1724,15 @@ app.post("/log-verification", (req, res) => {
   stats.verificationsLogged++;
   incrementStatForStatus(status);
 
-  appendDispositionEntry({
-    phone: phoneKey,
-    status,
-    disposition: getDispositionLabel(status),
-    summary: summary || "",
-    full_name: full_name || "",
-    source: "log_verification",
-    timestamp: new Date().toISOString(),
-  });
-
-  console.log(`[VERIFICATION] ${phoneKey}: ${getDispositionLabel(status)} — ${summary || ""}`);
-
-  // Queue rotation: pop the front entry so the next call to this phone
-  // serves the next person in the CSV.
-  if (phoneKey !== "unknown") {
-    const queue = contacts.get(phoneKey);
-    if (Array.isArray(queue) && queue.length > 0) {
-      const consumed = queue.shift();
-      console.log(`[QUEUE] ${phoneKey}: consumed "${consumed.full_name}" — ${queue.length} remaining`);
-      if (queue.length === 0) contacts.delete(phoneKey);
-    }
-  }
-
-  // Race condition fix: if call_ended arrived first and created a
-  // "customer_disconnected" fallback, overwrite it with real status.
+  // Dedup: if call_ended arrived first and created a "customer_disconnected"
+  // fallback, update that entry in place instead of creating a duplicate.
   const fallbackEntry = dispositionLog.slice().reverse().find(
     (d) => d.phone === phoneKey && d.status === "customer_disconnected" && d.source === "retell_call_ended"
   );
+
   if (fallbackEntry) {
+    fallbackEntry.initial_status = fallbackEntry.status;
+    fallbackEntry.initial_disposition = fallbackEntry.disposition;
     fallbackEntry.status = status;
     fallbackEntry.disposition = getDispositionLabel(status);
     fallbackEntry.summary = summary || fallbackEntry.summary;
@@ -1779,7 +1740,28 @@ app.post("/log-verification", (req, res) => {
     fallbackEntry.source = "log_verification_late";
     stats.customerDisconnectedCount--;
     persistDispositionUpdates();
-    console.log(`[VERIFICATION] Overwrote Customer Disconnected fallback for ${phoneKey} → ${getDispositionLabel(status)}`);
+    console.log(`[VERIFICATION] ${phoneKey}: ${getDispositionLabel(status)} (was customer_disconnected)`);
+  } else {
+    appendDispositionEntry({
+      phone: phoneKey,
+      status,
+      disposition: getDispositionLabel(status),
+      summary: summary || "",
+      full_name: full_name || "",
+      source: "log_verification",
+      timestamp: new Date().toISOString(),
+    });
+    console.log(`[VERIFICATION] ${phoneKey}: ${getDispositionLabel(status)}`);
+  }
+
+  // Queue rotation: pop the front entry so the next call to this phone
+  // serves the next person in the CSV.
+  if (phoneKey !== "unknown") {
+    const queue = contacts.get(phoneKey);
+    if (Array.isArray(queue) && queue.length > 0) {
+      const consumed = queue.shift();
+      if (queue.length === 0) contacts.delete(phoneKey);
+    }
   }
 
   return res.json({ result: `Logged: ${getDispositionLabel(status)}` });
@@ -1874,19 +1856,16 @@ app.post("/retell-call-ended", (req, res) => {
     const durationMs = call.duration_ms || 0;
     const disconnectReason = call.disconnection_reason || "";
 
-    console.log(`[CALL ENDED] ${phone} | ${durationMs}ms | ${disconnectReason}`);
-
     const hasVerification = phone.length === 10 && getVerification(phone);
     const hasDispositionEntry = dispositionLog.some(
       (d) => d.phone === phone
-        && d.source === "log_verification"
+        && (d.source === "log_verification" || d.source === "log_verification_late")
         && (Date.now() - new Date(d.timestamp).getTime()) < VERIFICATION_TTL
     );
 
     if (hasVerification || hasDispositionEntry) {
-      // Normal: log_verification already fired. Enrich with call metadata.
       const existing = dispositionLog.slice().reverse().find(
-        (d) => d.phone === phone && d.source === "log_verification"
+        (d) => d.phone === phone && (d.source === "log_verification" || d.source === "log_verification_late")
       );
       if (existing && !existing.call_id) {
         existing.call_id = callId;
@@ -1894,7 +1873,6 @@ app.post("/retell-call-ended", (req, res) => {
         existing.disconnect_reason = disconnectReason;
         persistDispositionUpdates();
       }
-      console.log(`[CALL ENDED] ${phone}: Verification exists — enriched with metadata`);
     } else {
       // FALLBACK: Customer hung up before log_verification.
       const fallbackQueue = phone.length === 10 ? contacts.get(phone) : null;
@@ -1922,7 +1900,7 @@ app.post("/retell-call-ended", (req, res) => {
       }
 
       stats.customerDisconnectedCount++;
-      console.log(`[CALL ENDED] ${phone}: ⚠ No verification — logged as Customer Disconnected`);
+      console.log(`[CALL ENDED] ${phone}: customer_disconnected (${disconnectReason})`);
     }
   }
 
@@ -1944,8 +1922,8 @@ app.post("/retell-call-ended", (req, res) => {
         const cs = (call.call_analysis.call_summary || "").toLowerCase();
         const callSuccessful = call.call_analysis.call_successful;
 
-        // Check verified FIRST — if Retell says call was successful and
-        // agent disconnected (not customer), this was a completed verification
+        let upgradedTo = null;
+
         if (
           callSuccessful === true
           || cs.includes("confirmed identity")
@@ -1955,27 +1933,18 @@ app.post("/retell-call-ended", (req, res) => {
           || cs.includes("transfer to our representative")
           || (cs.includes("confirmed") && cs.includes("transfer"))
         ) {
-          existing.status = "verified";
-          existing.disposition = getDispositionLabel("verified");
-          existing.summary = `Inferred: ${call.call_analysis.call_summary || ""}`;
-          stats.customerDisconnectedCount--;
+          upgradedTo = "verified";
           stats.verifiedCount++;
-          // Also update verificationResults so TCN Data Dip reads correct status
           if (existing.phone && existing.phone.length === 10) {
             storeVerification(existing.phone, {
               status: "verified",
-              summary: existing.summary,
+              summary: `Inferred: ${call.call_analysis.call_summary || ""}`,
               full_name: existing.full_name,
             });
           }
-          console.log(`[CALL ANALYZED] ${phone}: Upgraded → Full Name Verified - Right Party`);
         } else if (cs.includes("wrong number") || cs.includes("wrong person")) {
-          existing.status = "wrong_number";
-          existing.disposition = getDispositionLabel("wrong_number");
-          existing.summary = `Inferred: ${call.call_analysis.call_summary || ""}`;
-          stats.customerDisconnectedCount--;
+          upgradedTo = "wrong_number";
           stats.wrongNumberCount++;
-          console.log(`[CALL ANALYZED] ${phone}: Upgraded → Wrong Number`);
         } else if (
           cs.includes("call back later")
           || cs.includes("callback later")
@@ -1989,45 +1958,32 @@ app.post("/retell-call-ended", (req, res) => {
           || cs.includes("driving")
           || cs.includes("doctor appointment")
         ) {
-          existing.status = "consumer_busy_end";
-          existing.disposition = getDispositionLabel("consumer_busy_end");
-          existing.summary = `Inferred: ${call.call_analysis.call_summary || ""}`;
-          stats.customerDisconnectedCount--;
+          upgradedTo = "consumer_busy_end";
           stats.consumerBusyEndCount++;
-          console.log(`[CALL ANALYZED] ${phone}: Upgraded → Consumer Busy - End Call`);
         } else if (cs.includes("third party") || cs.includes("not available") || cs.includes("not home")) {
-          existing.status = "third_party_end";
-          existing.disposition = getDispositionLabel("third_party_end");
-          existing.summary = `Inferred: ${call.call_analysis.call_summary || ""}`;
-          stats.customerDisconnectedCount--;
+          upgradedTo = "third_party_end";
           stats.thirdPartyEndCount++;
-          console.log(`[CALL ANALYZED] ${phone}: Upgraded → Third party end`);
         } else if (cs.includes("do not call") || cs.includes("stop calling") || cs.includes("remove my number")) {
-          existing.status = "dnc";
-          existing.disposition = getDispositionLabel("dnc");
+          upgradedTo = "dnc";
+          stats.dncCount++;
+        }
+
+        if (upgradedTo) {
+          if (!existing.initial_status) {
+            existing.initial_status = existing.status;
+            existing.initial_disposition = existing.disposition;
+          }
+          existing.status = upgradedTo;
+          existing.disposition = getDispositionLabel(upgradedTo);
           existing.summary = `Inferred: ${call.call_analysis.call_summary || ""}`;
           stats.customerDisconnectedCount--;
-          stats.dncCount++;
-          console.log(`[CALL ANALYZED] ${phone}: Upgraded → DNC`);
+          console.log(`[CALL ANALYZED] ${phone}: ${existing.initial_disposition} → ${existing.disposition}`);
         } else {
           existing.summary = call.call_analysis.call_summary || existing.summary;
-          console.log(`[CALL ANALYZED] ${phone}: Enriched Customer Disconnected with analysis`);
         }
-      } else {
-        console.log(`[CALL ANALYZED] ${phone}: Enriched with transcript`);
       }
 
       persistDispositionUpdates();
-    } else {
-      appendDispositionEntry({
-        phone,
-        call_id: callId,
-        analysis: call.call_analysis,
-        transcript: call.transcript,
-        source: "retell_call_analyzed",
-        timestamp: new Date().toISOString(),
-      });
-      console.log(`[CALL ANALYZED] ${phone}: No matching entry — created standalone`);
     }
   }
 
@@ -2076,13 +2032,15 @@ app.get("/dispositions/csv", (req, res) => {
 
   const withStatus = filterDispositionEntries(dispositionLog, filters);
 
-  const header = "timestamp,phone,disposition,status,summary,full_name,call_id,duration_ms,disconnect_reason,source\n";
+  const header = "timestamp,phone,disposition,status,initial_disposition,initial_status,summary,full_name,call_id,duration_ms,disconnect_reason,source\n";
   const rows = withStatus.map((d) =>
     [
       d.timestamp || "",
       d.phone || "",
       getDispositionLabel(d.status),
       d.status || "",
+      d.initial_disposition || "",
+      d.initial_status || "",
       (d.summary || "").replace(/,/g, ";").replace(/\n/g, " "),
       (d.full_name || "").replace(/,/g, ";"),
       d.call_id || "",
