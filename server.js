@@ -11,7 +11,6 @@ const multer = require("multer");
 
 const app = express();
 app.use(express.json({ limit: "25mb" }));
-app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
 // Multer instance for multipart CSV uploads. In-memory (25 MB cap) so we can
 // write the file atomically to its date-keyed destination ourselves.
@@ -2085,39 +2084,6 @@ app.get("/verification-status", (req, res) => {
 });
 
 // ============================================================
-// ROUTE 3b: TCN CALL-COMPLETED (Hunt Group outcome)
-//
-// Called by TCN Data Dip AFTER Hunt Group element.
-//   outcome=agent_answered  → Hunt Group Action OK (agent took the call)
-//   outcome=no_agent        → Hunt Group Action Error (dropped/no agent)
-// ============================================================
-app.post("/call-completed", (req, res) => {
-  console.log(`[CALL COMPLETED] Raw request — query: ${JSON.stringify(req.query)}, body: ${JSON.stringify(req.body)}, content-type: ${req.headers["content-type"]}`);
-  const params = req.body || {};
-  const phone = normalizePhone(params.phone || req.query.phone || "");
-  const outcome = params.outcome || req.query.outcome || "";
-
-  if (!phone || phone.length !== 10) {
-    console.log(`[CALL COMPLETED] Invalid phone: ${params.phone || req.query.phone}`);
-    return res.json({ logged: false, error: "invalid phone" });
-  }
-
-  const entry = dispositionLog.slice().reverse().find(
-    (d) => d.phone === phone && (Date.now() - new Date(d.timestamp).getTime()) < VERIFICATION_TTL
-  );
-
-  if (entry) {
-    entry.tcn_outcome = outcome;
-    persistDispositionUpdates();
-    console.log(`[CALL COMPLETED] ${phone}: ${outcome} (was ${entry.status})`);
-  } else {
-    console.log(`[CALL COMPLETED] ${phone}: ${outcome} (no matching disposition found)`);
-  }
-
-  res.json({ logged: true, phone, outcome });
-});
-
-// ============================================================
 // ROUTE 4: RETELL CALL-ENDED WEBHOOK
 //
 // KEY LOGIC: If call_ended fires and NO log_verification exists
@@ -2304,7 +2270,7 @@ app.get("/dispositions/csv", (req, res) => {
 
   const withStatus = filterDispositionEntries(dispositionLog, filters);
 
-  const header = "timestamp_est,phone,disposition,status,summary,full_name,call_id,duration_ms,disconnect_reason,source,tcn_outcome\n";
+  const header = "timestamp_est,phone,disposition,status,summary,full_name,call_id,duration_ms,disconnect_reason,source\n";
   const rows = withStatus.map((d) =>
     [
       toEST(d.timestamp),
@@ -2317,7 +2283,6 @@ app.get("/dispositions/csv", (req, res) => {
       d.duration_ms || "",
       d.disconnect_reason || "",
       d.source || "",
-      d.tcn_outcome || "",
     ].join(",")
   ).join("\n");
 
@@ -2782,7 +2747,6 @@ loadContacts()
       console.log(`  POST /retell-webhook        → Retell inbound (dynamic vars)`);
       console.log(`  POST /log-verification      → Retell custom fn (verification result)`);
       console.log(`  GET  /verification-status    → TCN reads verification result`);
-      console.log(`  GET  /call-completed         → TCN Hunt Group outcome (agent_answered / no_agent)`);
       console.log(`  POST /retell-call-ended      → Retell call ended/analyzed webhook`);
       console.log(`  GET  /dispositions-portal    → Filtered disposition download UI`);
       console.log(`  GET  /monitoring             → Live call volume & disposition charts`);
