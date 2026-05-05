@@ -149,6 +149,11 @@ function normalizePhone(phone) {
   return digits.slice(-10);
 }
 
+function toEST(isoString) {
+  if (!isoString) return "";
+  return new Date(isoString).toLocaleString("en-US", { timeZone: CAMPAIGN_TIMEZONE, hour12: false }).replace(",", "");
+}
+
 function totalContactEntries() {
   let n = 0;
   for (const arr of contacts.values()) n += arr.length;
@@ -2273,10 +2278,10 @@ app.get("/dispositions/csv", (req, res) => {
 
   const withStatus = filterDispositionEntries(dispositionLog, filters);
 
-  const header = "timestamp,phone,disposition,status,initial_disposition,initial_status,summary,full_name,call_id,duration_ms,disconnect_reason,source\n";
+  const header = "timestamp_est,phone,disposition,status,initial_disposition,initial_status,summary,full_name,call_id,duration_ms,disconnect_reason,source\n";
   const rows = withStatus.map((d) =>
     [
-      d.timestamp || "",
+      toEST(d.timestamp),
       d.phone || "",
       getDispositionLabel(d.status),
       d.status || "",
