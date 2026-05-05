@@ -1508,7 +1508,7 @@ function getMonitoringHtml() {
   <div class="wrap">
     <h1>VTA Monitoring</h1>
     <p class="subtitle">Call volume &amp; disposition breakdown — hourly</p>
-    ${tokenRequired ? '<div class="auth-row"><input id="token" type="password" placeholder="Admin token"/><button onclick="loadData()">Unlock</button></div>' : ''}
+    ${tokenRequired ? '<div class="auth-row"><input id="token" type="password" placeholder="Admin token"/><button onclick="loadDates()">Unlock</button></div>' : ''}
     <div class="controls">
       <select id="dateSelect"><option value="">Loading...</option></select>
       <button onclick="loadData()">Refresh</button>
@@ -1538,7 +1538,7 @@ function getMonitoringHtml() {
     function getHeaders() {
       const h = {'Content-Type':'application/json'};
       const t = tokenRequired && document.getElementById('token') ? document.getElementById('token').value : '';
-      if (t) h['X-Campaign-Token'] = t;
+      if (t) h['x-campaign-admin-token'] = t;
       return h;
     }
 
@@ -1701,7 +1701,7 @@ function getMonitoringHtml() {
       } catch(e) { document.getElementById('statusMsg').textContent = e.message; }
     }
 
-    ${tokenRequired ? 'document.querySelector(".auth-row button").addEventListener("click", loadDates);' : 'loadDates();'}
+    ${tokenRequired ? '' : 'loadDates();'}
   </script>
 </body>
 </html>`;
