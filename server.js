@@ -2090,12 +2090,13 @@ app.get("/verification-status", (req, res) => {
 //   outcome=agent_answered  → Hunt Group Action OK (agent took the call)
 //   outcome=no_agent        → Hunt Group Action Error (dropped/no agent)
 // ============================================================
-app.get("/call-completed", (req, res) => {
-  const phone = normalizePhone(req.query.phone || "");
-  const outcome = req.query.outcome || "";
+app.post("/call-completed", (req, res) => {
+  const params = req.body || {};
+  const phone = normalizePhone(params.phone || req.query.phone || "");
+  const outcome = params.outcome || req.query.outcome || "";
 
   if (!phone || phone.length !== 10) {
-    console.log(`[CALL COMPLETED] Invalid phone: ${req.query.phone}`);
+    console.log(`[CALL COMPLETED] Invalid phone: ${params.phone || req.query.phone}`);
     return res.json({ logged: false, error: "invalid phone" });
   }
 
