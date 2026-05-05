@@ -1576,13 +1576,12 @@ function getMonitoringHtml() {
       const total = allData.length;
       const counts = {};
       allData.forEach(d => { counts[d.status] = (counts[d.status]||0) + 1; });
-      const upgraded = allData.filter(d => d.initial_status).length;
       let html = '<div class="stat"><div class="val">' + total + '</div><div class="lbl">Total Calls</div></div>';
       html += '<div class="stat"><div class="val">' + (counts.verified||0) + '</div><div class="lbl">Verified</div></div>';
       html += '<div class="stat"><div class="val">' + (counts.customer_wants_human||0) + '</div><div class="lbl">Wants Human</div></div>';
       html += '<div class="stat"><div class="val">' + (counts.customer_disconnected||0) + '</div><div class="lbl">Disconnected</div></div>';
       html += '<div class="stat"><div class="val">' + (counts.wrong_number||0) + '</div><div class="lbl">Wrong Number</div></div>';
-      html += '<div class="stat"><div class="val">' + upgraded + '</div><div class="lbl">Upgraded</div></div>';
+      html += '<div class="stat"><div class="val">' + (counts.consumer_busy_end||0) + '</div><div class="lbl">Consumer Busy</div></div>';
       grid.innerHTML = html;
     }
 
@@ -1970,15 +1969,23 @@ app.post("/log-verification", (req, res) => {
   stats.verificationsLogged++;
   incrementStatForStatus(status);
 
-  // Dedup: if call_ended arrived first and created a "customer_disconnected"
-  // fallback, update that entry in place instead of creating a duplicate.
+  appendDispositionEntry({
+    phone: phoneKey,
+    status,
+    disposition: getDispositionLabel(status),
+    summary: summary || "",
+    full_name: full_name || "",
+    source: "log_verification",
+    timestamp: new Date().toISOString(),
+  });
+
+  // If call_ended arrived first and created a customer_disconnected fallback,
+  // overwrite its status so reporting is accurate. Don't merge or suppress —
+  // back-to-back calls to the same phone would cause cross-call contamination.
   const fallbackEntry = dispositionLog.slice().reverse().find(
     (d) => d.phone === phoneKey && d.status === "customer_disconnected" && d.source === "retell_call_ended"
   );
-
   if (fallbackEntry) {
-    fallbackEntry.initial_status = fallbackEntry.status;
-    fallbackEntry.initial_disposition = fallbackEntry.disposition;
     fallbackEntry.status = status;
     fallbackEntry.disposition = getDispositionLabel(status);
     fallbackEntry.summary = summary || fallbackEntry.summary;
@@ -1986,18 +1993,7 @@ app.post("/log-verification", (req, res) => {
     fallbackEntry.source = "log_verification_late";
     stats.customerDisconnectedCount--;
     persistDispositionUpdates();
-    console.log(`[VERIFICATION] ${phoneKey}: ${getDispositionLabel(status)} (was customer_disconnected)`);
-  } else {
-    appendDispositionEntry({
-      phone: phoneKey,
-      status,
-      disposition: getDispositionLabel(status),
-      summary: summary || "",
-      full_name: full_name || "",
-      source: "log_verification",
-      timestamp: new Date().toISOString(),
-    });
-    console.log(`[VERIFICATION] ${phoneKey}: ${getDispositionLabel(status)}`);
+    console.log(`[VERIFICATION] ${phoneKey}: Overwrote customer_disconnected fallback → ${getDispositionLabel(status)}`);
   }
 
   // Queue rotation: pop the front entry so the next call to this phone
@@ -2215,15 +2211,11 @@ app.post("/retell-call-ended", (req, res) => {
         }
 
         if (upgradedTo) {
-          if (!existing.initial_status) {
-            existing.initial_status = existing.status;
-            existing.initial_disposition = existing.disposition;
-          }
           existing.status = upgradedTo;
           existing.disposition = getDispositionLabel(upgradedTo);
           existing.summary = `Inferred: ${call.call_analysis.call_summary || ""}`;
           stats.customerDisconnectedCount--;
-          console.log(`[CALL ANALYZED] ${phone}: ${existing.initial_disposition} → ${existing.disposition}`);
+          console.log(`[CALL ANALYZED] ${phone}: Upgraded → ${existing.disposition}`);
         } else {
           existing.summary = call.call_analysis.call_summary || existing.summary;
         }
@@ -2278,15 +2270,13 @@ app.get("/dispositions/csv", (req, res) => {
 
   const withStatus = filterDispositionEntries(dispositionLog, filters);
 
-  const header = "timestamp_est,phone,disposition,status,initial_disposition,initial_status,summary,full_name,call_id,duration_ms,disconnect_reason,source\n";
+  const header = "timestamp_est,phone,disposition,status,summary,full_name,call_id,duration_ms,disconnect_reason,source\n";
   const rows = withStatus.map((d) =>
     [
       toEST(d.timestamp),
       d.phone || "",
       getDispositionLabel(d.status),
       d.status || "",
-      d.initial_disposition || "",
-      d.initial_status || "",
       (d.summary || "").replace(/,/g, ";").replace(/\n/g, " "),
       (d.full_name || "").replace(/,/g, ";"),
       d.call_id || "",
