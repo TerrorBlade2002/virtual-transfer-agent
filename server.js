@@ -2159,55 +2159,35 @@ app.post("/retell-call-ended", (req, res) => {
       existing.transcript = call.transcript;
       if (!existing.call_id) existing.call_id = callId;
 
-      // Try to upgrade customer_disconnected with call analysis
+      // Try to upgrade customer_disconnected with call analysis.
+      //
+      // GATE BY DISCONNECT REASON — only user_hangup is eligible for upgrade.
+      // inactivity:       No human spoke. Retell analyzer hallucinates confirmations.
+      // voicemail_reached: Emma talked to a voicemail greeting, not a person.
+      // ivr_reached:       IVR system, not a person.
+      // agent_hangup:      Expected (Retell ended its own leg). Not a customer action.
+      //
+      // RESTRICT INFERRED STATUSES — only wrong_number and dnc are reliable.
+      // verified:          Retell summary is unreliable (says "confirmed" when customer
+      //                    said something vague before hanging up). 0% accuracy on edge cases.
+      // third_party_end:   "not available" matches voicemails and IVR, not just real third parties.
+      // consumer_busy_end: Borderline — safer to leave as customer_disconnected.
+      const dr = (existing.disconnect_reason || "").toLowerCase();
+      const upgradeEligible = dr === "user_hangup";
+
       if (existing.status === "customer_disconnected" && call.call_analysis) {
         const cs = (call.call_analysis.call_summary || "").toLowerCase();
-        const callSuccessful = call.call_analysis.call_successful;
 
         let upgradedTo = null;
 
-        if (
-          callSuccessful === true
-          || cs.includes("confirmed identity")
-          || cs.includes("confirmed name")
-          || cs.includes("verified")
-          || cs.includes("transfer to a representative")
-          || cs.includes("transfer to our representative")
-          || (cs.includes("confirmed") && cs.includes("transfer"))
-        ) {
-          upgradedTo = "verified";
-          stats.verifiedCount++;
-          if (existing.phone && existing.phone.length === 10) {
-            storeVerification(existing.phone, {
-              status: "verified",
-              summary: `Inferred: ${call.call_analysis.call_summary || ""}`,
-              full_name: existing.full_name,
-            });
+        if (upgradeEligible) {
+          if (cs.includes("wrong number") || cs.includes("wrong person")) {
+            upgradedTo = "wrong_number";
+            stats.wrongNumberCount++;
+          } else if (cs.includes("do not call") || cs.includes("stop calling") || cs.includes("remove my number")) {
+            upgradedTo = "dnc";
+            stats.dncCount++;
           }
-        } else if (cs.includes("wrong number") || cs.includes("wrong person")) {
-          upgradedTo = "wrong_number";
-          stats.wrongNumberCount++;
-        } else if (
-          cs.includes("call back later")
-          || cs.includes("callback later")
-          || cs.includes("consumer was busy")
-          || cs.includes("customer was busy")
-          || cs.includes("consumer is busy")
-          || cs.includes("customer is busy")
-          || cs.includes("busy right now")
-          || (cs.includes("busy") && cs.includes("call back"))
-          || cs.includes("at work")
-          || cs.includes("driving")
-          || cs.includes("doctor appointment")
-        ) {
-          upgradedTo = "consumer_busy_end";
-          stats.consumerBusyEndCount++;
-        } else if (cs.includes("third party") || cs.includes("not available") || cs.includes("not home")) {
-          upgradedTo = "third_party_end";
-          stats.thirdPartyEndCount++;
-        } else if (cs.includes("do not call") || cs.includes("stop calling") || cs.includes("remove my number")) {
-          upgradedTo = "dnc";
-          stats.dncCount++;
         }
 
         if (upgradedTo) {
@@ -2215,9 +2195,12 @@ app.post("/retell-call-ended", (req, res) => {
           existing.disposition = getDispositionLabel(upgradedTo);
           existing.summary = `Inferred: ${call.call_analysis.call_summary || ""}`;
           stats.customerDisconnectedCount--;
-          console.log(`[CALL ANALYZED] ${phone}: Upgraded → ${existing.disposition}`);
+          console.log(`[CALL ANALYZED] ${phone}: Upgraded → ${existing.disposition} (disconnect: ${dr})`);
         } else {
           existing.summary = call.call_analysis.call_summary || existing.summary;
+          if (!upgradeEligible && dr) {
+            console.log(`[CALL ANALYZED] ${phone}: Skipped upgrade — disconnect_reason=${dr}`);
+          }
         }
       }
 
