@@ -1950,6 +1950,7 @@ app.post("/log-verification", (req, res) => {
     || req.body?.from_number
     || "";
   const normalized = normalizePhone(phone);
+  const callId = req.body?.call?.call_id || "";
 
   if (!status) {
     console.log(`[VERIFICATION] ERROR — no status provided`);
@@ -1976,15 +1977,18 @@ app.post("/log-verification", (req, res) => {
     summary: summary || "",
     full_name: full_name || "",
     source: "log_verification",
+    call_id: callId,
     timestamp: new Date().toISOString(),
   });
 
-  // If call_ended arrived first and created a customer_disconnected fallback,
-  // overwrite its status so reporting is accurate. Don't merge or suppress —
-  // back-to-back calls to the same phone would cause cross-call contamination.
-  const fallbackEntry = dispositionLog.slice().reverse().find(
-    (d) => d.phone === phoneKey && d.status === "customer_disconnected" && d.source === "retell_call_ended"
-  );
+  // If call_ended arrived first and created a customer_disconnected fallback for
+  // THIS SPECIFIC call, overwrite its status. Match by call_id so back-to-back
+  // calls to the same phone (queue rotation) don't cross-contaminate.
+  const fallbackEntry = callId
+    ? dispositionLog.slice().reverse().find(
+        (d) => d.phone === phoneKey && d.call_id === callId && d.status === "customer_disconnected" && d.source === "retell_call_ended"
+      )
+    : null;
   if (fallbackEntry) {
     fallbackEntry.status = status;
     fallbackEntry.disposition = getDispositionLabel(status);
@@ -1993,7 +1997,7 @@ app.post("/log-verification", (req, res) => {
     fallbackEntry.source = "log_verification_late";
     stats.customerDisconnectedCount--;
     persistDispositionUpdates();
-    console.log(`[VERIFICATION] ${phoneKey}: Overwrote customer_disconnected fallback → ${getDispositionLabel(status)}`);
+    console.log(`[VERIFICATION] ${phoneKey} (${callId}): Overwrote customer_disconnected fallback → ${getDispositionLabel(status)}`);
   }
 
   // Queue rotation: pop the front entry so the next call to this phone
@@ -2184,7 +2188,15 @@ app.post("/retell-call-ended", (req, res) => {
           if (cs.includes("wrong number") || cs.includes("wrong person")) {
             upgradedTo = "wrong_number";
             stats.wrongNumberCount++;
-          } else if (cs.includes("do not call") || cs.includes("stop calling") || cs.includes("remove my number")) {
+          } else if (
+            cs.includes("do not call")
+            || cs.includes("stop calling")
+            || cs.includes("remove my number")
+            || cs.includes("not to be called")
+            || cs.includes("not to call")
+            || cs.includes("don't call")
+            || cs.includes("take me off")
+          ) {
             upgradedTo = "dnc";
             stats.dncCount++;
           }
