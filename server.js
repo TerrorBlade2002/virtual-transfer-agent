@@ -1483,110 +1483,421 @@ function getMonitoringHtml() {
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-  <title>VTA Monitoring</title>
+  <title>VTA Console</title>
   <style>
+    :root {
+      --bg: #0a0a0a;
+      --surface: #171717;
+      --surface-2: #1f1f1f;
+      --border: #262626;
+      --border-strong: #404040;
+      --text: #fafafa;
+      --text-muted: #a3a3a3;
+      --text-dim: #525252;
+      --accent: #d97757;
+      --accent-soft: rgba(217, 119, 87, 0.12);
+      --green: #22c55e;
+      --green-soft: rgba(34, 197, 94, 0.12);
+      --red: #ef4444;
+      --red-dark: #dc2626;
+      --blue: #3b82f6;
+      --gray: #71717a;
+      --purple: #a855f7;
+      --orange: #f97316;
+      --yellow: #eab308;
+    }
     *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;background:#0a0a0a;color:#e5e5e5;padding:24px}
-    .wrap{max-width:1200px;margin:0 auto}
-    h1{font-size:1.3rem;font-weight:600;margin-bottom:4px}
-    .subtitle{color:#737373;font-size:0.85rem;margin-bottom:20px}
-    .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:20px}
-    select,input,button{font-family:inherit;font-size:0.85rem;padding:6px 10px;border:1px solid #333;border-radius:6px;background:#171717;color:#e5e5e5;outline:none}
-    select:focus,input:focus{border-color:#525252}
-    button{cursor:pointer;background:#262626;border-color:#404040}
-    button:hover{background:#333}
-    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:24px}
-    .stat{background:#171717;border:1px solid #262626;border-radius:10px;padding:14px;text-align:center}
-    .stat .val{font-size:1.5rem;font-weight:700;color:#fafafa}
-    .stat .lbl{font-size:0.75rem;color:#737373;margin-top:2px}
-    .chart-container{background:#171717;border:1px solid #262626;border-radius:10px;padding:16px;margin-bottom:16px}
-    .chart-title{font-size:0.85rem;font-weight:600;margin-bottom:10px;color:#a3a3a3}
-    canvas{width:100%!important;height:200px!important}
-    .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px}
-    .legend-item{display:flex;align-items:center;gap:4px;font-size:0.75rem;color:#a3a3a3}
-    .legend-dot{width:10px;height:10px;border-radius:2px}
-    .status-msg{color:#737373;font-size:0.85rem;margin-top:8px}
-    ${tokenRequired ? '.auth-row{margin-bottom:16px;display:flex;gap:8px;align-items:center}' : ''}
+    body{
+      font-family:'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+      background:var(--bg);color:var(--text);padding:24px;min-height:100vh;
+      font-feature-settings:"cv11","ss01";
+    }
+    .mono{font-family:'JetBrains Mono','SF Mono',SFMono-Regular,Consolas,Menlo,monospace;font-variant-numeric:tabular-nums}
+    .wrap{max-width:1400px;margin:0 auto}
+    .header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;flex-wrap:wrap;gap:16px}
+    .title h1{font-size:1.5rem;font-weight:600;letter-spacing:-0.02em;margin-bottom:4px}
+    .title p{color:var(--text-muted);font-size:0.875rem}
+    .live-indicator{display:flex;align-items:center;gap:8px;padding:6px 12px;border:1px solid var(--border);border-radius:999px;font-size:0.8rem;color:var(--text-muted)}
+    .live-dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 0 var(--green);animation:pulse 2s infinite}
+    .live-dot.paused{background:var(--text-dim);animation:none;box-shadow:none}
+    @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,0.4)}70%{box-shadow:0 0 0 8px rgba(34,197,94,0)}100%{box-shadow:0 0 0 0 rgba(34,197,94,0)}}
+    .toolbar{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:24px;padding:12px 16px;background:var(--surface);border:1px solid var(--border);border-radius:10px}
+    .pill-group{display:flex;gap:4px;background:var(--bg);padding:3px;border-radius:8px;border:1px solid var(--border)}
+    .pill{padding:5px 12px;font-size:0.8rem;border:none;background:transparent;color:var(--text-muted);cursor:pointer;border-radius:6px;font-family:inherit;font-weight:500;transition:all 200ms}
+    .pill:hover{color:var(--text)}
+    .pill.active{background:var(--surface-2);color:var(--text);box-shadow:0 0 0 1px var(--border-strong)}
+    .sep{width:1px;height:20px;background:var(--border)}
+    select,input[type=date]{font-family:inherit;font-size:0.8rem;padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);outline:none;cursor:pointer}
+    select:hover,input[type=date]:hover{border-color:var(--border-strong)}
+    select:focus,input[type=date]:focus{border-color:var(--text-dim)}
+    .icon-btn{display:flex;align-items:center;justify-content:center;width:30px;height:30px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text-muted);cursor:pointer;transition:all 200ms}
+    .icon-btn:hover{border-color:var(--border-strong);color:var(--text)}
+    .icon-btn svg{width:14px;height:14px}
+    .updated{margin-left:auto;font-size:0.75rem;color:var(--text-dim);display:flex;align-items:center;gap:8px}
+    .refresh-ring{width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:none}
+    .refresh-ring.spinning{animation:spin 1s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+
+    .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:20px}
+    .stat-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;position:relative;overflow:hidden;transition:border-color 200ms}
+    .stat-card:hover{border-color:var(--border-strong)}
+    .stat-label{font-size:0.7rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-dim);font-weight:600;margin-bottom:6px}
+    .stat-value{font-size:1.75rem;font-weight:600;letter-spacing:-0.02em;line-height:1;margin-bottom:4px}
+    .stat-trend{font-size:0.7rem;color:var(--text-dim);display:flex;align-items:center;gap:4px}
+    .stat-trend.up{color:var(--green)}
+    .stat-trend.down{color:var(--red)}
+    .stat-spark{height:24px;margin-top:8px}
+
+    .grid-2{display:grid;grid-template-columns:2fr 1fr;gap:16px;margin-bottom:16px}
+    @media(max-width:900px){.grid-2{grid-template-columns:1fr}}
+    .panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px}
+    .panel-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+    .panel-title{font-size:0.875rem;font-weight:600;color:var(--text);letter-spacing:-0.01em}
+    .panel-subtitle{font-size:0.7rem;color:var(--text-dim);margin-top:1px}
+    .legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;font-size:0.75rem}
+    .legend-item{display:flex;align-items:center;gap:6px;color:var(--text-muted)}
+    .legend-dot{width:8px;height:8px;border-radius:2px}
+
+    .h-bar-list{display:flex;flex-direction:column;gap:10px}
+    .h-bar-row{display:grid;grid-template-columns:120px 1fr 50px;gap:10px;align-items:center;font-size:0.8rem}
+    .h-bar-label{color:var(--text-muted);font-size:0.75rem}
+    .h-bar-track{height:8px;background:var(--bg);border-radius:4px;overflow:hidden;position:relative}
+    .h-bar-fill{height:100%;border-radius:4px;transition:width 400ms cubic-bezier(0.4,0,0.2,1)}
+    .h-bar-count{text-align:right;color:var(--text);font-weight:500}
+
+    .feed{max-height:400px;overflow-y:auto}
+    .feed::-webkit-scrollbar{width:6px}
+    .feed::-webkit-scrollbar-track{background:transparent}
+    .feed::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+    .feed::-webkit-scrollbar-thumb:hover{background:var(--border-strong)}
+    .feed-row{display:grid;grid-template-columns:80px 18px 110px 1fr;gap:10px;align-items:center;padding:8px 4px;border-bottom:1px solid var(--border);font-size:0.8rem;animation:fadein 300ms ease-out}
+    @keyframes fadein{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+    .feed-row:last-child{border-bottom:none}
+    .feed-time{color:var(--text-dim);font-size:0.7rem}
+    .feed-status-dot{width:8px;height:8px;border-radius:50%;justify-self:center}
+    .feed-phone{color:var(--text-muted);letter-spacing:0.02em}
+    .feed-name{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .feed-status-label{color:var(--text-dim);font-size:0.7rem;text-transform:lowercase}
+
+    .toast{position:fixed;top:24px;right:24px;background:var(--surface);border:1px solid var(--red);color:var(--text);padding:10px 16px;border-radius:8px;font-size:0.8rem;box-shadow:0 8px 24px rgba(0,0,0,0.4);z-index:1000;animation:slidein 200ms ease-out}
+    .toast.success{border-color:var(--green)}
+    @keyframes slidein{from{transform:translateX(20px);opacity:0}to{transform:translateX(0);opacity:1}}
+    .skeleton{background:linear-gradient(90deg,var(--surface) 0%,var(--surface-2) 50%,var(--surface) 100%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:6px;height:1.5rem}
+    @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+    .auth-overlay{position:fixed;inset:0;background:rgba(10,10,10,0.95);display:none;align-items:center;justify-content:center;z-index:100}
+    .auth-overlay.show{display:flex}
+    .auth-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:32px;width:340px;max-width:90vw}
+    .auth-card h2{font-size:1.1rem;font-weight:600;margin-bottom:6px}
+    .auth-card p{font-size:0.825rem;color:var(--text-muted);margin-bottom:20px}
+    .auth-card input{width:100%;font-size:0.875rem;padding:9px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);outline:none;margin-bottom:12px;font-family:inherit}
+    .auth-card input:focus{border-color:var(--accent)}
+    .auth-card button{width:100%;font-size:0.875rem;font-weight:500;padding:10px;border:none;border-radius:6px;background:var(--accent);color:#000;cursor:pointer;font-family:inherit;transition:opacity 200ms}
+    .auth-card button:hover{opacity:0.9}
+    .auth-error{color:var(--red);font-size:0.8rem;margin-top:8px;display:none}
+    .auth-error.show{display:block}
   </style>
 </head>
 <body>
+  ${tokenRequired ? `
+  <div class="auth-overlay show" id="authOverlay">
+    <div class="auth-card">
+      <h2>Authentication Required</h2>
+      <p>Enter your admin token to access the console.</p>
+      <input id="tokenInput" type="password" placeholder="Admin token" autocomplete="off"/>
+      <button onclick="authenticate()">Unlock</button>
+      <div class="auth-error" id="authError"></div>
+    </div>
+  </div>` : ''}
+
   <div class="wrap">
-    <h1>VTA Monitoring</h1>
-    <p class="subtitle">Call volume &amp; disposition breakdown — hourly</p>
-    ${tokenRequired ? '<div class="auth-row"><input id="token" type="password" placeholder="Admin token"/><button onclick="loadDates()">Unlock</button></div>' : ''}
-    <div class="controls">
-      <select id="dateSelect"><option value="">Loading...</option></select>
-      <button onclick="loadData()">Refresh</button>
-      <span class="status-msg" id="statusMsg"></span>
+    <div class="header">
+      <div class="title">
+        <h1>VTA Console</h1>
+        <p>Real-time call monitoring &amp; dispositions</p>
+      </div>
+      <div class="live-indicator">
+        <span class="live-dot" id="liveDot"></span>
+        <span id="liveLabel">Live · auto 30s</span>
+      </div>
     </div>
-    <div class="grid" id="statsGrid"></div>
-    <div class="chart-container">
-      <div class="chart-title">Calls per Hour</div>
-      <canvas id="hourlyChart"></canvas>
-      <div class="legend" id="hourlyLegend"></div>
+
+    <div class="toolbar">
+      <div class="pill-group" id="rangeGroup">
+        <button class="pill active" data-range="today">Today</button>
+        <button class="pill" data-range="yesterday">Yesterday</button>
+        <button class="pill" data-range="7d">Last 7 days</button>
+        <button class="pill" data-range="custom">Custom</button>
+      </div>
+      <input type="date" id="customDate" style="display:none"/>
+      <div class="sep"></div>
+      <select id="statusFilter">
+        <option value="">All statuses</option>
+        <option value="verified">Verified only</option>
+        <option value="customer_disconnected">Disconnected only</option>
+        <option value="wrong_number">Wrong Number only</option>
+        <option value="customer_wants_human">Wants Human only</option>
+        <option value="dnc">DNC only</option>
+        <option value="third_party_end">Third Party only</option>
+        <option value="consumer_busy_end">Consumer Busy only</option>
+      </select>
+      <button class="icon-btn" id="pauseBtn" title="Pause auto-refresh">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+      </button>
+      <button class="icon-btn" id="refreshBtn" title="Refresh now (R)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+      </button>
+      <div class="updated">
+        <div class="refresh-ring" id="refreshRing"></div>
+        <span id="updatedLabel">—</span>
+      </div>
     </div>
-    <div class="chart-container">
-      <div class="chart-title">Disposition Breakdown</div>
-      <canvas id="dispositionChart"></canvas>
-      <div class="legend" id="dispositionLegend"></div>
+
+    <div class="stats" id="statsGrid"></div>
+
+    <div class="grid-2">
+      <div class="panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">Call Volume</div>
+            <div class="panel-subtitle" id="volumeSubtitle">Hourly breakdown</div>
+          </div>
+        </div>
+        <canvas id="volumeChart" style="width:100%;height:240px"></canvas>
+        <div class="legend">
+          <div class="legend-item"><div class="legend-dot" style="background:#525252"></div>Total</div>
+          <div class="legend-item"><div class="legend-dot" style="background:#22c55e"></div>Verified</div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">Disposition Breakdown</div>
+            <div class="panel-subtitle">All statuses</div>
+          </div>
+        </div>
+        <div class="h-bar-list" id="dispositionList"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title">Recent Activity</div>
+          <div class="panel-subtitle" id="feedSubtitle">Latest dispositions, newest first</div>
+        </div>
+      </div>
+      <div class="feed" id="activityFeed"></div>
     </div>
   </div>
+
   <script>
     const COLORS = {
-      verified:'#22c55e',wrong_number:'#ef4444',third_party_end:'#f97316',
-      consumer_busy_end:'#eab308',dnc:'#dc2626',customer_wants_human:'#3b82f6',
-      customer_disconnected:'#6b7280',other:'#a855f7'
+      verified:'#22c55e',
+      wrong_number:'#ef4444',
+      third_party_end:'#f97316',
+      consumer_busy_end:'#eab308',
+      dnc:'#dc2626',
+      customer_wants_human:'#3b82f6',
+      customer_disconnected:'#71717a',
+      other:'#a855f7'
+    };
+    const LABELS = {
+      verified:'Verified',
+      wrong_number:'Wrong Number',
+      third_party_end:'Third Party',
+      consumer_busy_end:'Consumer Busy',
+      dnc:'DNC',
+      customer_wants_human:'Wants Human',
+      customer_disconnected:'Disconnected',
+      other:'Other'
     };
     const tokenRequired = ${tokenRequired};
+    const REFRESH_INTERVAL_MS = 30000;
     let allData = [];
+    let filteredData = [];
+    let currentRange = 'today';
+    let currentStatus = '';
+    let customDate = '';
+    let authToken = '';
+    let lastFetchTs = 0;
+    let refreshTimer = null;
+    let countdownTimer = null;
+    let paused = false;
 
     function getHeaders() {
       const h = {'Content-Type':'application/json'};
-      const t = tokenRequired && document.getElementById('token') ? document.getElementById('token').value : '';
-      if (t) h['x-campaign-admin-token'] = t;
+      if (tokenRequired && authToken) h['x-campaign-admin-token'] = authToken;
       return h;
     }
 
-    async function loadData() {
-      const msg = document.getElementById('statusMsg');
-      msg.textContent = 'Loading...';
+    function authenticate() {
+      const inp = document.getElementById('tokenInput');
+      const err = document.getElementById('authError');
+      authToken = inp.value.trim();
+      if (!authToken) { err.textContent = 'Token required'; err.classList.add('show'); return; }
+      fetch('/dispositions/availability', {headers:getHeaders()})
+        .then(r => {
+          if (!r.ok) throw new Error('Invalid token');
+          document.getElementById('authOverlay').classList.remove('show');
+          err.classList.remove('show');
+          init();
+        })
+        .catch(e => { err.textContent = e.message; err.classList.add('show'); });
+    }
+
+    function getDatesForRange(range) {
+      const now = new Date();
+      const todayStr = ymd(now);
+      if (range === 'today') return [todayStr];
+      if (range === 'yesterday') {
+        const y = new Date(now); y.setDate(y.getDate() - 1);
+        return [ymd(y)];
+      }
+      if (range === '7d') {
+        const dates = [];
+        for (let i = 0; i < 7; i++) {
+          const d = new Date(now); d.setDate(d.getDate() - i);
+          dates.push(ymd(d));
+        }
+        return dates;
+      }
+      if (range === 'custom' && customDate) return [customDate];
+      return [todayStr];
+    }
+
+    function ymd(d) {
+      const y = d.getFullYear();
+      const m = String(d.getMonth()+1).padStart(2,'0');
+      const day = String(d.getDate()).padStart(2,'0');
+      return y + '-' + m + '-' + day;
+    }
+
+    async function fetchData() {
+      const ring = document.getElementById('refreshRing');
+      ring.classList.add('spinning');
       try {
-        const dateVal = document.getElementById('dateSelect').value;
+        const dates = getDatesForRange(currentRange);
         const params = new URLSearchParams({limit:'5000'});
-        if (dateVal) params.set('date', dateVal);
+        if (currentRange === '7d') {
+          params.set('from', dates[dates.length-1]);
+          params.set('to', dates[0]);
+        } else if (dates.length === 1) {
+          params.set('date', dates[0]);
+        }
         const res = await fetch('/dispositions?' + params.toString(), {headers:getHeaders()});
-        if (!res.ok) throw new Error((await res.json()).error || res.statusText);
+        if (!res.ok) throw new Error('Failed to load (' + res.status + ')');
         const json = await res.json();
         allData = json.dispositions || [];
+        lastFetchTs = Date.now();
+        applyFilters();
         render();
-        msg.textContent = allData.length + ' entries loaded';
+        updateLabel();
       } catch(e) {
-        msg.textContent = 'Error: ' + e.message;
+        showToast(e.message, false);
+      } finally {
+        setTimeout(() => ring.classList.remove('spinning'), 400);
       }
+    }
+
+    function applyFilters() {
+      filteredData = currentStatus
+        ? allData.filter(d => d.status === currentStatus)
+        : allData.slice();
     }
 
     function render() {
       renderStats();
-      renderHourlyChart();
-      renderDispositionChart();
+      renderVolumeChart();
+      renderDispositionList();
+      renderActivityFeed();
     }
 
     function renderStats() {
       const grid = document.getElementById('statsGrid');
-      const total = allData.length;
+      const total = filteredData.length;
       const counts = {};
-      allData.forEach(d => { counts[d.status] = (counts[d.status]||0) + 1; });
-      let html = '<div class="stat"><div class="val">' + total + '</div><div class="lbl">Total Calls</div></div>';
-      html += '<div class="stat"><div class="val">' + (counts.verified||0) + '</div><div class="lbl">Verified</div></div>';
-      html += '<div class="stat"><div class="val">' + (counts.customer_wants_human||0) + '</div><div class="lbl">Wants Human</div></div>';
-      html += '<div class="stat"><div class="val">' + (counts.customer_disconnected||0) + '</div><div class="lbl">Disconnected</div></div>';
-      html += '<div class="stat"><div class="val">' + (counts.wrong_number||0) + '</div><div class="lbl">Wrong Number</div></div>';
-      html += '<div class="stat"><div class="val">' + (counts.consumer_busy_end||0) + '</div><div class="lbl">Consumer Busy</div></div>';
-      grid.innerHTML = html;
+      filteredData.forEach(d => { counts[d.status] = (counts[d.status]||0) + 1; });
+      const rate = total > 0 ? ((counts.verified||0) / total * 100).toFixed(1) : '0.0';
+      const cards = [
+        { label:'Total Calls', value:total, key:'total' },
+        { label:'Verified', value:counts.verified||0, key:'verified', color:'#22c55e' },
+        { label:'Wants Human', value:counts.customer_wants_human||0, key:'customer_wants_human', color:'#3b82f6' },
+        { label:'Disconnected', value:counts.customer_disconnected||0, key:'customer_disconnected' },
+        { label:'Wrong Number', value:counts.wrong_number||0, key:'wrong_number', color:'#ef4444' },
+        { label:'Verification Rate', value:rate + '%', key:'rate', color:'#d97757' },
+      ];
+      grid.innerHTML = cards.map(c =>
+        '<div class="stat-card">' +
+          '<div class="stat-label">' + c.label + '</div>' +
+          '<div class="stat-value mono"' + (c.color ? ' style="color:' + c.color + '"' : '') + '>' + c.value + '</div>' +
+          '<canvas class="stat-spark" data-key="' + c.key + '"></canvas>' +
+        '</div>'
+      ).join('');
+      document.querySelectorAll('.stat-spark').forEach(c => renderSparkline(c, c.dataset.key));
     }
 
-    function renderHourlyChart() {
-      const canvas = document.getElementById('hourlyChart');
+    function renderSparkline(canvas, key) {
+      const ctx = canvas.getContext('2d');
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.scale(dpr, dpr);
+      const W = rect.width, H = rect.height;
+      ctx.clearRect(0,0,W,H);
+      const hourly = new Array(24).fill(0);
+      const totals = new Array(24).fill(0);
+      filteredData.forEach(d => {
+        if (!d.timestamp) return;
+        const h = new Date(d.timestamp).getHours();
+        totals[h]++;
+        if (key === 'total') hourly[h]++;
+        else if (key === 'rate') {}
+        else if (d.status === key) hourly[h]++;
+      });
+      let series = hourly;
+      if (key === 'rate') {
+        series = totals.map((t, i) => {
+          const v = filteredData.filter(d => d.timestamp && new Date(d.timestamp).getHours() === i && d.status === 'verified').length;
+          return t > 0 ? (v / t) * 100 : 0;
+        });
+      }
+      const max = Math.max(...series, 1);
+      const stroke = key === 'verified' ? '#22c55e' :
+                     key === 'rate' ? '#d97757' :
+                     key === 'wrong_number' ? '#ef4444' :
+                     key === 'customer_wants_human' ? '#3b82f6' :
+                     '#a3a3a3';
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      const points = series.map((v, i) => ({ x: (i / 23) * W, y: H - (v / max) * (H - 2) - 1 }));
+      drawSmoothLine(ctx, points);
+      ctx.stroke();
+      // area fill
+      const grad = ctx.createLinearGradient(0, 0, 0, H);
+      grad.addColorStop(0, stroke + '40');
+      grad.addColorStop(1, stroke + '00');
+      ctx.fillStyle = grad;
+      ctx.lineTo(W, H);
+      ctx.lineTo(0, H);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function drawSmoothLine(ctx, pts) {
+      if (!pts.length) return;
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) {
+        const p0 = pts[i-1], p1 = pts[i];
+        const cpx = (p0.x + p1.x) / 2;
+        ctx.bezierCurveTo(cpx, p0.y, cpx, p1.y, p1.x, p1.y);
+      }
+    }
+
+    function renderVolumeChart() {
+      const canvas = document.getElementById('volumeChart');
       const ctx = canvas.getContext('2d');
       const dpr = window.devicePixelRatio || 1;
       const rect = canvas.getBoundingClientRect();
@@ -1597,115 +1908,202 @@ function getMonitoringHtml() {
       ctx.clearRect(0,0,W,H);
 
       const hourly = new Array(24).fill(0);
-      const hourlyVerified = new Array(24).fill(0);
-      allData.forEach(d => {
+      const verified = new Array(24).fill(0);
+      filteredData.forEach(d => {
         if (!d.timestamp) return;
         const h = new Date(d.timestamp).getHours();
         hourly[h]++;
-        if (d.status === 'verified') hourlyVerified[h]++;
+        if (d.status === 'verified') verified[h]++;
       });
 
       const max = Math.max(...hourly, 1);
-      const padL = 36, padR = 10, padT = 10, padB = 24;
+      const padL = 44, padR = 16, padT = 12, padB = 32;
       const chartW = W - padL - padR;
       const chartH = H - padT - padB;
-      const barW = chartW / 24;
 
-      ctx.strokeStyle = '#333';
-      ctx.lineWidth = 0.5;
+      // grid
+      ctx.strokeStyle = '#262626';
+      ctx.lineWidth = 1;
+      ctx.font = '10px JetBrains Mono, SF Mono, monospace';
+      ctx.fillStyle = '#525252';
+      ctx.textAlign = 'right';
       for (let i = 0; i <= 4; i++) {
         const y = padT + chartH - (chartH * i / 4);
         ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
-        ctx.fillStyle = '#525252'; ctx.font = '10px monospace'; ctx.textAlign = 'right';
-        ctx.fillText(Math.round(max * i / 4), padL - 4, y + 3);
+        ctx.fillText(Math.round(max * i / 4), padL - 6, y + 3);
+      }
+      // x-axis labels
+      ctx.textAlign = 'center';
+      for (let i = 0; i < 24; i += 3) {
+        const x = padL + (i / 23) * chartW;
+        ctx.fillText(String(i).padStart(2,'0') + ':00', x, H - padB + 16);
       }
 
-      hourly.forEach((v, i) => {
-        const x = padL + i * barW + 2;
-        const bw = barW - 4;
-        const bh = (v / max) * chartH;
-        ctx.fillStyle = '#404040';
-        ctx.fillRect(x, padT + chartH - bh, bw, bh);
-        const vh = (hourlyVerified[i] / max) * chartH;
-        ctx.fillStyle = '#22c55e';
-        ctx.fillRect(x, padT + chartH - vh, bw, vh);
-        if (i % 3 === 0) {
-          ctx.fillStyle = '#525252'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
-          ctx.fillText(i + ':00', x + bw/2, H - 4);
-        }
-      });
+      // total line + area
+      const totalPts = hourly.map((v, i) => ({ x: padL + (i / 23) * chartW, y: padT + chartH - (v / max) * chartH }));
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#a3a3a3';
+      ctx.beginPath();
+      drawSmoothLine(ctx, totalPts);
+      ctx.stroke();
+      const totalGrad = ctx.createLinearGradient(0, padT, 0, padT + chartH);
+      totalGrad.addColorStop(0, 'rgba(163,163,163,0.18)');
+      totalGrad.addColorStop(1, 'rgba(163,163,163,0)');
+      ctx.fillStyle = totalGrad;
+      ctx.lineTo(padL + chartW, padT + chartH);
+      ctx.lineTo(padL, padT + chartH);
+      ctx.closePath();
+      ctx.fill();
 
-      const legend = document.getElementById('hourlyLegend');
-      legend.innerHTML = '<div class="legend-item"><div class="legend-dot" style="background:#404040"></div>Total</div><div class="legend-item"><div class="legend-dot" style="background:#22c55e"></div>Verified</div>';
+      // verified line + area
+      const verifPts = verified.map((v, i) => ({ x: padL + (i / 23) * chartW, y: padT + chartH - (v / max) * chartH }));
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#22c55e';
+      ctx.beginPath();
+      drawSmoothLine(ctx, verifPts);
+      ctx.stroke();
+      const vGrad = ctx.createLinearGradient(0, padT, 0, padT + chartH);
+      vGrad.addColorStop(0, 'rgba(34,197,94,0.25)');
+      vGrad.addColorStop(1, 'rgba(34,197,94,0)');
+      ctx.fillStyle = vGrad;
+      ctx.lineTo(padL + chartW, padT + chartH);
+      ctx.lineTo(padL, padT + chartH);
+      ctx.closePath();
+      ctx.fill();
     }
 
-    function renderDispositionChart() {
-      const canvas = document.getElementById('dispositionChart');
-      const ctx = canvas.getContext('2d');
-      const dpr = window.devicePixelRatio || 1;
-      const rect = canvas.getBoundingClientRect();
-      canvas.width = rect.width * dpr;
-      canvas.height = rect.height * dpr;
-      ctx.scale(dpr, dpr);
-      const W = rect.width, H = rect.height;
-      ctx.clearRect(0,0,W,H);
-
+    function renderDispositionList() {
+      const list = document.getElementById('dispositionList');
       const counts = {};
-      allData.forEach(d => { counts[d.status] = (counts[d.status]||0) + 1; });
-      const statuses = Object.keys(counts).sort((a,b) => counts[b] - counts[a]);
-      if (!statuses.length) return;
-
+      filteredData.forEach(d => { counts[d.status] = (counts[d.status]||0) + 1; });
+      const sorted = Object.keys(counts).sort((a,b) => counts[b] - counts[a]);
       const max = Math.max(...Object.values(counts), 1);
-      const padL = 36, padR = 10, padT = 10, padB = 40;
-      const chartW = W - padL - padR;
-      const chartH = H - padT - padB;
-      const barW = chartW / statuses.length;
-
-      ctx.strokeStyle = '#333'; ctx.lineWidth = 0.5;
-      for (let i = 0; i <= 4; i++) {
-        const y = padT + chartH - (chartH * i / 4);
-        ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
-        ctx.fillStyle = '#525252'; ctx.font = '10px monospace'; ctx.textAlign = 'right';
-        ctx.fillText(Math.round(max * i / 4), padL - 4, y + 3);
+      if (!sorted.length) {
+        list.innerHTML = '<div style="color:var(--text-dim);font-size:0.8rem;padding:8px">No dispositions yet</div>';
+        return;
       }
-
-      statuses.forEach((s, i) => {
-        const x = padL + i * barW + 4;
-        const bw = barW - 8;
-        const bh = (counts[s] / max) * chartH;
-        ctx.fillStyle = COLORS[s] || '#525252';
-        ctx.fillRect(x, padT + chartH - bh, bw, bh);
-        ctx.save();
-        ctx.translate(x + bw/2, padT + chartH + 6);
-        ctx.rotate(-0.5);
-        ctx.fillStyle = '#737373'; ctx.font = '9px monospace'; ctx.textAlign = 'left';
-        ctx.fillText(s.replace(/_/g,' ').slice(0,14), 0, 0);
-        ctx.restore();
-      });
-
-      const legend = document.getElementById('dispositionLegend');
-      legend.innerHTML = statuses.map(s => '<div class="legend-item"><div class="legend-dot" style="background:' + (COLORS[s]||'#525252') + '"></div>' + s.replace(/_/g,' ') + ' (' + counts[s] + ')</div>').join('');
+      list.innerHTML = sorted.map(s => {
+        const pct = (counts[s] / max) * 100;
+        const color = COLORS[s] || '#525252';
+        const label = LABELS[s] || s.replace(/_/g,' ');
+        return '<div class="h-bar-row">' +
+          '<div class="h-bar-label">' + label + '</div>' +
+          '<div class="h-bar-track"><div class="h-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div>' +
+          '<div class="h-bar-count mono">' + counts[s] + '</div>' +
+        '</div>';
+      }).join('');
     }
 
-    async function loadDates() {
-      try {
-        const res = await fetch('/dispositions/availability', {headers:getHeaders()});
-        if (!res.ok) return;
-        const json = await res.json();
-        const sel = document.getElementById('dateSelect');
-        sel.innerHTML = '';
-        const dates = json.dates || [];
-        if (!dates.length) { sel.innerHTML = '<option value="">No data</option>'; return; }
-        dates.forEach(d => {
-          const opt = document.createElement('option');
-          opt.value = d.date; opt.textContent = d.date + ' (' + d.count + ')';
-          sel.appendChild(opt);
+    function renderActivityFeed() {
+      const feed = document.getElementById('activityFeed');
+      const sub = document.getElementById('feedSubtitle');
+      const recent = filteredData.slice(0, 30);
+      sub.textContent = 'Showing ' + recent.length + ' of ' + filteredData.length;
+      if (!recent.length) {
+        feed.innerHTML = '<div style="color:var(--text-dim);font-size:0.8rem;padding:12px">No activity yet</div>';
+        return;
+      }
+      feed.innerHTML = recent.map(d => {
+        const ts = d.timestamp ? new Date(d.timestamp) : null;
+        const time = ts ? String(ts.getHours()).padStart(2,'0') + ':' + String(ts.getMinutes()).padStart(2,'0') + ':' + String(ts.getSeconds()).padStart(2,'0') : '--:--:--';
+        const color = COLORS[d.status] || '#525252';
+        const label = LABELS[d.status] || d.status;
+        const phone = d.phone && d.phone.length === 10 ? '****-' + d.phone.slice(-4) : (d.phone || '—');
+        const name = d.full_name || '<span style="color:var(--text-dim)">—</span>';
+        return '<div class="feed-row">' +
+          '<div class="feed-time mono">' + time + '</div>' +
+          '<div class="feed-status-dot" style="background:' + color + '" title="' + label + '"></div>' +
+          '<div class="feed-phone mono">' + phone + '</div>' +
+          '<div class="feed-name">' + name + ' <span class="feed-status-label">· ' + label.toLowerCase() + '</span></div>' +
+        '</div>';
+      }).join('');
+    }
+
+    function updateLabel() {
+      const el = document.getElementById('updatedLabel');
+      if (!lastFetchTs) { el.textContent = '—'; return; }
+      const sec = Math.floor((Date.now() - lastFetchTs) / 1000);
+      el.textContent = sec < 60 ? 'Updated ' + sec + 's ago' : 'Updated ' + Math.floor(sec/60) + 'm ago';
+    }
+
+    function showToast(msg, success) {
+      const t = document.createElement('div');
+      t.className = 'toast' + (success ? ' success' : '');
+      t.textContent = msg;
+      document.body.appendChild(t);
+      setTimeout(() => t.remove(), 3500);
+    }
+
+    function startAutoRefresh() {
+      stopAutoRefresh();
+      refreshTimer = setInterval(() => { if (!paused && !document.hidden) fetchData(); }, REFRESH_INTERVAL_MS);
+      countdownTimer = setInterval(updateLabel, 1000);
+    }
+    function stopAutoRefresh() {
+      if (refreshTimer) clearInterval(refreshTimer);
+      if (countdownTimer) clearInterval(countdownTimer);
+    }
+
+    function togglePause() {
+      paused = !paused;
+      const dot = document.getElementById('liveDot');
+      const lbl = document.getElementById('liveLabel');
+      const btn = document.getElementById('pauseBtn');
+      if (paused) {
+        dot.classList.add('paused');
+        lbl.textContent = 'Paused';
+        btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
+      } else {
+        dot.classList.remove('paused');
+        lbl.textContent = 'Live · auto 30s';
+        btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+        fetchData();
+      }
+    }
+
+    function init() {
+      document.querySelectorAll('#rangeGroup .pill').forEach(b => {
+        b.addEventListener('click', () => {
+          document.querySelectorAll('#rangeGroup .pill').forEach(x => x.classList.remove('active'));
+          b.classList.add('active');
+          currentRange = b.dataset.range;
+          const cd = document.getElementById('customDate');
+          cd.style.display = currentRange === 'custom' ? '' : 'none';
+          document.getElementById('volumeSubtitle').textContent =
+            currentRange === 'today' ? 'Today · hourly' :
+            currentRange === 'yesterday' ? 'Yesterday · hourly' :
+            currentRange === '7d' ? 'Last 7 days · hourly' : 'Custom date · hourly';
+          if (currentRange !== 'custom' || customDate) fetchData();
         });
-        loadData();
-      } catch(e) { document.getElementById('statusMsg').textContent = e.message; }
+      });
+      document.getElementById('customDate').addEventListener('change', (e) => {
+        customDate = e.target.value;
+        if (customDate) fetchData();
+      });
+      document.getElementById('statusFilter').addEventListener('change', (e) => {
+        currentStatus = e.target.value;
+        applyFilters();
+        render();
+      });
+      document.getElementById('refreshBtn').addEventListener('click', fetchData);
+      document.getElementById('pauseBtn').addEventListener('click', togglePause);
+      document.addEventListener('keydown', (e) => {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+        if (e.key === 'r' || e.key === 'R') fetchData();
+        else if (e.key === ' ') { e.preventDefault(); togglePause(); }
+      });
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && !paused) fetchData();
+      });
+      fetchData();
+      startAutoRefresh();
     }
 
-    ${tokenRequired ? '' : 'loadDates();'}
+    if (tokenRequired) {
+      document.getElementById('tokenInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') authenticate(); });
+    } else {
+      init();
+    }
   </script>
 </body>
 </html>`;
