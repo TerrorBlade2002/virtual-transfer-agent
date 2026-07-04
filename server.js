@@ -662,6 +662,15 @@ function buildContactsMapFromCsv(csvFilePath, nameColumn) {
           if (!nextContacts.has(phone)) nextContacts.set(phone, []);
           nextContacts.get(phone).push({
             full_name: chosenName,
+            // Second-ID verification fields (two-step prompt). Lowercase keys —
+            // the LiveKit worker reads dynamic_variables.dob / .addr1 / .city /
+            // .state / .zip verbatim and composes the spoken mailing address.
+            dob: (row["DOB"] || "").trim(),
+            addr1: (row["ADDR1"] || "").trim(),
+            addr2: (row["ADDR2"] || "").trim(),
+            city: (row["CITY"] || "").trim(),
+            state: (row["STATE"] || "").trim(),
+            zip: (row["ZIP"] || "").trim(),
             raw_record: {
               full_name_original: (row[DEFAULT_NAME_COLUMN] || "").trim(),
               account: (row["ACCOUNT"] || "").trim(),
@@ -2302,6 +2311,15 @@ app.post("/retell-webhook", (req, res) => {
       call_inbound: {
         dynamic_variables: {
           full_name: contact.full_name,
+          // Second-ID fields for the two-step verification prompt. Additive —
+          // existing consumers of full_name are unaffected. The worker falls
+          // back to its DEFAULT_* values for any empty field.
+          dob: contact.dob || "",
+          addr1: contact.addr1 || "",
+          addr2: contact.addr2 || "",
+          city: contact.city || "",
+          state: contact.state || "",
+          zip: contact.zip || "",
         },
         metadata: {
           source: "tcn_linkback",
