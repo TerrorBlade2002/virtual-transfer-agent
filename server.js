@@ -2358,7 +2358,10 @@ app.post("/retell-webhook", (req, res) => {
 // ============================================================
 app.post("/log-verification", (req, res) => {
   const args = req.body?.args || req.body || {};
-  const { status, summary, full_name } = args;
+  // new_contact_number / new_mailing_address / callback_time are OPTIONAL
+  // structured captures (two-ID agent). Absent on older agents — all paths
+  // below treat them as empty strings, so behavior is unchanged without them.
+  const { status, summary, full_name, new_contact_number, new_mailing_address, callback_time } = args;
 
   const phone = args.phone
     || req.body?.call?.from_number
@@ -2392,6 +2395,9 @@ app.post("/log-verification", (req, res) => {
     disposition: getDispositionLabel(status),
     summary: summary || "",
     full_name: full_name || "",
+    new_contact_number: new_contact_number || "",
+    new_mailing_address: new_mailing_address || "",
+    callback_time: callback_time || "",
     source: "log_verification",
     call_id: callId,
     timestamp: new Date().toISOString(),
@@ -2410,6 +2416,9 @@ app.post("/log-verification", (req, res) => {
     fallbackEntry.disposition = getDispositionLabel(status);
     fallbackEntry.summary = summary || fallbackEntry.summary;
     fallbackEntry.full_name = full_name || fallbackEntry.full_name;
+    if (new_contact_number) fallbackEntry.new_contact_number = new_contact_number;
+    if (new_mailing_address) fallbackEntry.new_mailing_address = new_mailing_address;
+    if (callback_time) fallbackEntry.callback_time = callback_time;
     fallbackEntry.source = "log_verification_late";
     stats.customerDisconnectedCount--;
     persistDispositionUpdates();
@@ -2681,7 +2690,8 @@ app.get("/dispositions/csv", (req, res) => {
 
   const withStatus = filterDispositionEntries(dispositionLog, filters);
 
-  const header = "timestamp_est,phone,disposition,status,summary,full_name,call_id,duration_ms,disconnect_reason,source\n";
+  // New columns are APPENDED so existing consumers indexing by position keep working.
+  const header = "timestamp_est,phone,disposition,status,summary,full_name,call_id,duration_ms,disconnect_reason,source,new_contact_number,new_mailing_address,callback_time\n";
   const rows = withStatus.map((d) =>
     [
       toEST(d.timestamp),
@@ -2694,6 +2704,9 @@ app.get("/dispositions/csv", (req, res) => {
       d.duration_ms || "",
       d.disconnect_reason || "",
       d.source || "",
+      (d.new_contact_number || "").replace(/,/g, ";"),
+      (d.new_mailing_address || "").replace(/,/g, ";").replace(/\n/g, " "),
+      (d.callback_time || "").replace(/,/g, ";"),
     ].join(",")
   ).join("\n");
 
